@@ -106,6 +106,8 @@
     rew: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4 3.5v4h4"/></svg>',
     kbd: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6.5 10h.01M10 10h.01M13.5 10h.01M17 10h.01M7.5 14h9"/></svg>',
     rss: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 11a8 8 0 0 1 8 8M5 5a14 14 0 0 1 14 14"/><circle cx="6" cy="18" r="1.4" fill="currentColor" stroke="none"/></svg>',
+    x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>',
+    trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 7h15M9.5 7V4.8h5V7M6.5 7l.9 12.2h9.2L17.5 7M10 10.5v5.5M14 10.5v5.5"/></svg>',
     bksp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5h11a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H9l-6-7z"/><path d="M12 9.5l5 5M17 9.5l-5 5"/></svg>',
     fwd: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M20 3.5v4h-4"/></svg>'
   };
@@ -196,31 +198,65 @@
     return h.toString(36);
   }
   function feedAddress(term) {
-    let t = (term || '').trim().replace(/\s+/g, '');
-    if (!t || /\s/.test((term || '').trim())) return '';
+    let t = (term || '').trim();
+    if (!t) return '';
+    // An address anywhere in the text wins (the glasses' text panel adds to what's already there).
+    const at = t.search(/(https?:\/\/|feed:|itpc:|pcast:|www\.)/i);
+    if (at >= 0) t = t.slice(at).replace(/\s+/g, '');
+    else if (/\s/.test(t)) return '';
     t = t.replace(/^(feed|itpc|pcast|podcast):(\/\/)?/i, '');
     if (/^https?:\/\//i.test(t)) return t;
     if (/^www\./i.test(t) || /^[a-z0-9-]+(\.[a-z0-9-]+)+\/\S*/i.test(t) && /(rss|feed|xml|podcast|\.php|\/)/i.test(t)) return 'https://' + t;
     return '';
   }
 
+  class FeedError extends Error {
+    constructor(kind, status) { super(kind); this.kind = kind; this.status = status; }
+  }
   async function readFeedFull(url) {
     const original = url;
     const secure = url.replace(/^http:\/\//i, 'https://');
     let lastErr;
     for (const [i, route] of FEED_ROUTES.entries()) {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 25000);
+      const timer = setTimeout(() => ctrl.abort(), i === 0 ? 30000 : 20000);
+      let res;
       try {
-        const res = await fetch(route(i === 0 ? secure : original), { signal: ctrl.signal, credentials: 'omit' });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
+        res = await fetch(route(i === 0 ? secure : original), { signal: ctrl.signal, credentials: 'omit' });
+      } catch (e) {
+        lastErr = new FeedError(e && e.name === 'AbortError' ? 'timeout' : 'blocked');
+        clearTimeout(timer);
+        continue; // the browser couldn't read it at all — try a relay
+      }
+      try {
+        if (!res.ok) {
+          // The feed's own host answered with an error: the address or its key is wrong.
+          if (i === 0) throw new FeedError('status', res.status);
+          lastErr = new FeedError('blocked');
+          continue;
+        }
         const text = await res.text();
-        if (!/<(rss|channel|feed)[\s>]/i.test(text)) throw new Error('not a feed');
+        if (!/<(rss|channel|feed)[\s>]/i.test(text)) {
+          if (i === 0) throw new FeedError('notfeed');
+          lastErr = new FeedError('blocked');
+          continue;
+        }
         return text;
-      } catch (e) { lastErr = e; }
-      finally { clearTimeout(timer); }
+      } catch (e) {
+        if (e instanceof FeedError) throw e;
+        lastErr = new FeedError(e && e.name === 'AbortError' ? 'timeout' : 'blocked');
+      } finally { clearTimeout(timer); }
     }
-    throw lastErr || new Error('feed unavailable');
+    throw lastErr || new FeedError('blocked');
+  }
+  function feedErrorText(e) {
+    const k = e && e.kind;
+    if (k === 'status' && (e.status === 401 || e.status === 403)) return `The feed host refused access (error ${e.status}). For a private feed like Patreon, copy a fresh RSS link from your account — the key in it may have changed.`;
+    if (k === 'status' && e.status === 404) return 'The feed host says that address doesn\'t exist (error 404). Check every character, including capitals.';
+    if (k === 'status') return `The feed host returned error ${e.status}. Check the address and try again.`;
+    if (k === 'notfeed') return 'That address opened a web page, not a podcast feed. Make sure it\'s the RSS link.';
+    if (k === 'timeout') return 'The feed took too long to load. Try again in a moment.';
+    return 'The feed couldn\'t be reached. Check your connection and the address.';
   }
 
   function parseDur(v) {
@@ -535,8 +571,27 @@
     paintPlayer();
     setPlaybackState();
   });
-  audio.addEventListener('error', () => {
-    if (audio.src) toast("Couldn't stream this episode");
+  let retriedFor = null;
+  audio.addEventListener('error', async () => {
+    if (!audio.src || !nowPlaying) return;
+    const { ep, show } = nowPlaying;
+    // Private-feed audio links expire. Re-read the feed once for a fresh link before giving up.
+    if (isRss(show.id) && retriedFor !== ep.id) {
+      retriedFor = ep.id;
+      try {
+        const eps = await fetchEpisodes(show.id, true);
+        const fresh = eps.find(x => x.id === ep.id);
+        if (fresh && fresh.url !== ep.url) {
+          const pos = audio.currentTime || posOf(ep);
+          nowPlaying.ep = fresh; store.set('now', nowPlaying);
+          audio.src = fresh.url;
+          audio.addEventListener('loadedmetadata', () => { try { audio.currentTime = pos; } catch {} }, { once: true });
+          play();
+          return;
+        }
+      } catch {}
+    }
+    toast("Couldn't stream this episode");
     paintPlayer(false);
   });
   window.addEventListener('pagehide', () => persistPos(true));
@@ -674,11 +729,14 @@
   function showRow(s) {
     const e = epMem[s.id] || store.get('eps.' + s.id, null);
     const latest = e && e.eps[0] ? 'Latest · ' + fmtDate(e.eps[0].date) : esc(s.author);
-    return `<button class="row" data-act="show" data-id="${s.id}" data-key="show-${s.id}">
-      ${artImg(s)}
-      <span class="txt"><div class="t">${esc(s.title)}</div><div class="s">${latest}</div></span>
-      <span data-badge="${s.id}">${badgeHtml(s)}</span>
-    </button>`;
+    return `<div class="rowwrap libitem" data-libitem="${esc(s.id)}">
+      <button class="row" data-act="show" data-id="${s.id}" data-key="show-${s.id}">
+        ${artImg(s)}
+        <span class="txt"><div class="t">${esc(s.title)}</div><div class="s">${latest}</div></span>
+        <span data-badge="${s.id}">${badgeHtml(s)}</span>
+      </button>
+      <button class="rm" data-act="libremove" data-id="${s.id}" data-key="rm-${s.id}" aria-label="Remove ${esc(s.title)} from Library">${I.trash}<span>Remove?</span></button>
+    </div>`;
   }
 
   function continueCard() {
@@ -722,8 +780,9 @@
     app.innerHTML = `${nowBar()}
       <header class="top">
         ${backBtn('')}
-        <form class="searchbar" id="sform" role="search" autocomplete="off">
+        <form class="searchbar ${lastSearch.q ? 'has-text' : ''}" id="sform" role="search" autocomplete="off">
           <input id="q" type="search" enterkeyhint="search" autocapitalize="off" spellcheck="false" placeholder="Show name or RSS feed" value="${esc(lastSearch.q)}" data-key="q" aria-label="Search by show name, or enter an RSS feed address">
+          <button type="button" class="clearq" data-act="clearq" data-key="clearq" aria-label="Clear search">${I.x}</button>
         </form>
         <button class="icon-btn kbtoggle ${kbOpen ? 'on' : ''}" data-act="keyboard" data-key="kb" aria-label="${kbOpen ? 'Hide keyboard' : 'Show keyboard'}">${I.kbd}</button>
         <button class="pill gobtn" data-act="dosearch" data-key="go">${I.search}<span>Search</span></button>
@@ -736,6 +795,7 @@
     // as soon as the text lands and then move the highlight onto the results.
     q.addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(() => runSearch(q.value, true), 700); });
     q.addEventListener('change', () => { clearTimeout(deb); runSearch(q.value, true); });
+    q.addEventListener('input', () => syncClear());
     if (kbOpen) focusFirst(q.value ? '[data-key="k-go"]' : '[data-key="k-https"]');
     else focusFirst(lastSearch.results && lastSearch.results.length ? '#results .row' : '[data-key="go"]', '#q');
   };
@@ -772,13 +832,19 @@
     q.value = fn(q.value);
     lastSearch.q = q.value;
     q.scrollLeft = q.scrollWidth;
+    syncClear();
+  }
+  function syncClear() {
+    const f = $('#sform'), q = $('#q');
+    if (f && q) f.classList.toggle('has-text', !!q.value);
   }
 
   function resultsHtml() {
     const s = lastSearch;
     if (s.loading) return `<div class="searching">${s.feed ? 'Reading feed' : 'Searching for'} “${esc(s.q)}”…</div><div class="list">${'<div class="skel"></div>'.repeat(4)}</div>`;
     if (s.error) return s.feed
-      ? `<div class="status"><div class="big">Couldn't read that feed</div><div>Check the address is a podcast RSS feed and try again.</div></div>`
+      ? `<div class="status"><div class="big">Couldn't read that feed</div><div>${esc(feedErrorText(s.error))}</div>
+          <button class="pill" data-act="clearq" data-key="err-clear">${I.x}<span>Clear and start again</span></button></div>`
       : `<div class="status"><div class="big">Search failed</div><div>Check your connection and try again.</div></div>`;
     if (!s.results) return `<div class="status">${logo(false)}<div>Find shows by name, host, topic or RSS feed.</div>
       <button class="pill" data-act="keyboard" data-key="kb-open">${I.kbd}<span>Type with keyboard</span></button></div>`;
@@ -802,6 +868,7 @@
     if (term === lastSearch.q && (lastSearch.loading || (lastSearch.results && quiet))) return;
     kbOpen = false;
     const kb = $('.kbtoggle'); if (kb) kb.classList.remove('on');
+    syncClear();
     const feed = feedAddress(term);
     const seq = ++searchSeq;
     lastSearch = { q: term, results: null, error: null, loading: true, feed: !!feed };
@@ -822,7 +889,7 @@
     box.innerHTML = resultsHtml();
     box.scrollTop = 0;
     if (moveFocus) {
-      const f = $('#results .row') || $('[data-key="go"]');
+      const f = $('#results .row') || $('#results button') || $('[data-key="go"]');
       if (f) f.focus({ preventScroll: true });
     }
   }
@@ -999,6 +1066,20 @@
     lastPaintedPlaying = playing;
   }
 
+  // Two-step confirm: the first press arms the button, a second press within 4 s confirms.
+  // Moving the highlight away (or waiting) cancels it.
+  function armConfirm(b, revert) {
+    if (b.dataset.armed === '1') { delete b.dataset.armed; clearTimeout(b._armT); return true; }
+    b.dataset.armed = '1';
+    const cancel = () => {
+      if (b.dataset.armed !== '1') return;
+      delete b.dataset.armed; clearTimeout(b._armT); revert();
+    };
+    b._armT = setTimeout(cancel, 4000);
+    b.addEventListener('blur', cancel, { once: true });
+    return false;
+  }
+
   // ---------------------------------------------------------------- actions
   const ACTIONS = {
     back,
@@ -1020,18 +1101,69 @@
     },
     toggleadd: (b) => {
       const id = b.dataset.id;
-      if (inLib(id)) removeShow(id); else addShow(id);
+      if (inLib(id)) {
+        if (!armConfirm(b, () => {
+          b.classList.add('on'); b.innerHTML = I.check; b.setAttribute('aria-label', 'In Library — remove');
+        })) {
+          b.classList.remove('confirm', 'wide'); b.classList.remove('on');
+          b.innerHTML = 'Remove?'; b.classList.add('confirm', 'wide');
+          b.setAttribute('aria-label', 'Press again to remove from Library');
+          return;
+        }
+        removeShow(id);
+      } else addShow(id);
       const on = inLib(id);
+      b.classList.remove('confirm', 'wide');
       b.classList.toggle('on', on);
       b.innerHTML = on ? I.check : I.plus;
       b.setAttribute('aria-label', on ? 'In Library — remove' : 'Add to Library');
     },
     libtoggle: (b) => {
       const id = b.dataset.id;
-      if (inLib(id)) removeShow(id); else addShow(id);
-      const on = inLib(id);
-      b.classList.toggle('primary', !on);
-      b.innerHTML = on ? I.check + '<span>In Library</span>' : I.plus + '<span>Add to Library</span>';
+      const paint = () => {
+        const on = inLib(id);
+        b.classList.remove('confirm');
+        b.classList.toggle('primary', !on);
+        b.innerHTML = on ? I.check + '<span>In Library</span>' : I.plus + '<span>Add to Library</span>';
+      };
+      if (inLib(id)) {
+        if (!armConfirm(b, paint)) {
+          b.classList.remove('primary'); b.classList.add('confirm');
+          b.innerHTML = I.trash + '<span>Remove from Library?</span>';
+          return;
+        }
+        removeShow(id);
+      } else addShow(id);
+      paint();
+    },
+    libremove: (b) => {
+      const id = b.dataset.id;
+      if (!armConfirm(b, () => b.classList.remove('confirm'))) { b.classList.add('confirm'); return; }
+      const item = b.closest('.libitem');
+      removeShow(id);
+      // move the highlight to a neighbouring show (or Search if the Library is now empty)
+      const next = item && (item.nextElementSibling || item.previousElementSibling);
+      if (item) {
+        item.classList.add('leaving');
+        setTimeout(() => {
+          item.remove();
+          const f = next && next.querySelector('.row');
+          if (f) f.focus({ preventScroll: true });
+          else render(current);
+        }, 260);
+      }
+    },
+    clearq: () => {
+      const q = $('#q');
+      if (q) q.value = '';
+      lastSearch = { q: '', results: null, error: null, loading: false, feed: false };
+      searchSeq++;
+      syncClear();
+      const box = $('#results');
+      if (box) box.innerHTML = kbOpen ? keyboardHtml() : resultsHtml();
+      const f = kbOpen ? $('[data-key="k-https"]') : q;
+      if (f) f.focus({ preventScroll: true });
+      toast('Search cleared');
     },
     allplayed: (b) => {
       const e = epMem[b.dataset.id];
@@ -1202,7 +1334,6 @@
       const dir = DIRS[e.key];
       if (!dir) return;
       const a = document.activeElement;
-      if (a && a.tagName === 'INPUT' && dir[0] !== 0) return; // leave caret movement alone
       e.preventDefault();
       move(dir);
     });

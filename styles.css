@@ -589,3 +589,48 @@ input:focus {
 .key.go svg { inline-size: 18px; block-size: 18px; }
 .js-nav .key:focus, .key:focus-visible { background: var(--text); color: #000; outline: none; }
 .js-nav .key.go:focus { background: var(--grad); }
+
+/* ---------- Clear (×) inside the search box ---------- */
+.searchbar { position: relative; }
+.searchbar input { padding-right: 52px; }
+.clearq {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  inline-size: 40px;
+  block-size: 40px;
+  border-radius: 50%;
+  display: none;
+  place-items: center;
+  background: rgba(255,255,255,.12);
+  color: var(--text);
+}
+.searchbar.has-text .clearq { display: grid; }
+.clearq svg { inline-size: 20px; block-size: 20px; }
+
+/* ---------- Removing shows (two-step: press once to arm, again to confirm) ---------- */
+:root { --warn: #FF8A7A; }
+.rm {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  inline-size: 52px;
+  border-radius: var(--radius);
+  color: var(--played);
+  font-size: .75rem;
+  font-weight: 700;
+  transition: inline-size .2s var(--ease), background .2s, color .2s;
+}
+.rm svg { inline-size: 22px; block-size: 22px; flex: none; }
+.rm span { display: none; }
+.rm.confirm { inline-size: 132px; color: var(--warn); background: rgba(255,138,122,.14); }
+.rm.confirm span { display: inline; }
+.js-nav .rm:focus, .rm:focus-visible { color: var(--text); }
+.js-nav .rm.confirm:focus, .rm.confirm:focus-visible { color: var(--warn); }
+.add.confirm, .pill.confirm { color: var(--warn); background: rgba(255,138,122,.14); }
+.add.wide { inline-size: 110px; font-size: .75rem; font-weight: 700; }
+.libitem { transition: opacity .25s, transform .25s var(--ease); }
+.libitem.leaving { opacity: 0; transform: translateX(-30px); }
