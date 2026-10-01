@@ -1,0 +1,982 @@
+/* GlassCast — a streaming podcast player for Meta Ray-Ban Display glasses.
+ * Plain HTML/CSS/JS, no build step. Host on any HTTPS static host (e.g. GitHub Pages).
+ *
+ * Input: the glasses send ArrowUp/Down/Left/Right + Enter as keydown events and the
+ * WebView moves focus between native <button>s itself (spatial navigation).
+ * Back: the glasses' Back gesture calls history.back(), so every screen is a history entry.
+ * Data: Apple's public iTunes Search/Lookup API via JSONP (no key, no CORS problems).
+ */
+(() => {
+  'use strict';
+
+  // ---------------------------------------------------------------- config
+  const NS = 'glasscast.';
+  const SKIP_BACK = 15;
+  const SKIP_FWD = 30;
+  const SPEEDS = [1, 1.25, 1.5, 1.75, 2, 0.8];
+  const PLAYED_TAIL = 20;          // seconds from the end that counts as "heard"
+  const REFRESH_MS = 30 * 60e3;    // re-check library shows for new episodes every 30 min
+  const MAX_DEPTH = 4;             // glasses cap pushState history at 5 entries
+  const COUNTRY = (() => {
+    const m = (navigator.language || 'en-US').match(/-([A-Za-z]{2})$/);
+    return (m ? m[1] : 'US').toUpperCase();
+  })();
+
+  // ---------------------------------------------------------------- storage
+  const store = {
+    get(k, d) {
+      try { const v = localStorage.getItem(NS + k); return v == null ? d : JSON.parse(v); }
+      catch { return d; }
+    },
+    set(k, v) {
+      try { localStorage.setItem(NS + k, JSON.stringify(v)); }
+      catch (e) { console.warn('GlassCast storage failed:', e); }
+    },
+    del(k) { try { localStorage.removeItem(NS + k); } catch {} }
+  };
+
+  let library = store.get('library', []);   // [{id,title,author,art,added}]
+  let progress = store.get('progress', {});  // {epId:{p:pos,d:dur,played:bool,t:ts}}
+  let speed = store.get('speed', 1);
+  let nowPlaying = store.get('now', null);   // {ep:{...}, show:{...}}
+  const showMeta = {};                       // id -> show (search results etc.)
+  const epMem = {};                          // id -> {t, eps}
+  library.forEach(s => (showMeta[s.id] = s));
+
+  const saveLibrary = () => store.set('library', library);
+  let progTimer = 0;
+  const saveProgress = (now) => {
+    clearTimeout(progTimer);
+    if (now) store.set('progress', progress);
+    else progTimer = setTimeout(() => store.set('progress', progress), 800);
+  };
+
+  // ---------------------------------------------------------------- helpers
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const inLib = (id) => library.some(s => String(s.id) === String(id));
+
+  function fmtClock(sec) {
+    sec = Math.max(0, Math.floor(sec || 0));
+    const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
+  }
+  function fmtDur(sec) {
+    if (!sec) return '';
+    const m = Math.round(sec / 60);
+    if (m < 60) return m + ' min';
+    return Math.floor(m / 60) + ' hr' + (m % 60 ? ' ' + (m % 60) + ' min' : '');
+  }
+  function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso), now = new Date();
+    const days = Math.floor((now - d) / 864e5);
+    if (days < 1) return 'Today';
+    if (days < 2) return 'Yesterday';
+    if (days < 7) return d.toLocaleDateString(undefined, { weekday: 'long' });
+    const o = { day: 'numeric', month: 'short' };
+    if (d.getFullYear() !== now.getFullYear()) o.year = 'numeric';
+    return d.toLocaleDateString(undefined, o);
+  }
+  const art = (url, size = 300) => url ? url.replace(/\/\d+x\d+bb\./, `/${size}x${size}bb.`) : '';
+
+  let toastT = 0;
+  function toast(msg) {
+    const t = $('#toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toastT);
+    toastT = setTimeout(() => t.classList.remove('show'), 2600);
+  }
+
+  // ---------------------------------------------------------------- icons
+  const I = {
+    search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 20 20"/></svg>',
+    back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>',
+    plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+    check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+    checks: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12.5l4.5 4.5L15 8.5M11 16l1 1L21.5 7.5"/></svg>',
+    minus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h14"/></svg>',
+    play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.2v13.6c0 .8.9 1.3 1.6.9l10.8-6.8c.6-.4.6-1.3 0-1.7L9.6 4.3C8.9 3.9 8 4.4 8 5.2z"/></svg>',
+    pause: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4.5" width="4.2" height="15" rx="1.4"/><rect x="13.8" y="4.5" width="4.2" height="15" rx="1.4"/></svg>',
+    start: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="5" width="2.6" height="14" rx="1.2"/><path d="M19.5 6.3v11.4c0 .8-.9 1.2-1.5.8L9.6 12.8a1 1 0 0 1 0-1.6L18 5.5c.6-.4 1.5 0 1.5.8z"/></svg>',
+    end: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="17.4" y="5" width="2.6" height="14" rx="1.2"/><path d="M4.5 6.3v11.4c0 .8.9 1.2 1.5.8l8.4-5.7a1 1 0 0 0 0-1.6L6 5.5c-.6-.4-1.5 0-1.5.8z"/></svg>',
+    rew: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4 3.5v4h4"/></svg>',
+    fwd: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M20 3.5v4h-4"/></svg>'
+  };
+
+  function logo(live = false, cls = '') {
+    const bars = [10, 18, 26, 18, 10].map((h, i) =>
+      `<rect class="bar" x="${16.3 + i * 5}" y="${32 - h / 2}" width="3.4" height="${h}" rx="1.7"/>`).join('');
+    return `<svg class="logo ${live ? 'live' : ''} ${cls}" viewBox="0 0 64 64" aria-hidden="true">
+      <path d="M44.85 46.14A22 22 0 1 1 44.85 17.86" fill="none" stroke="url(#gc-grad)" stroke-width="4" stroke-linecap="round"/>
+      <g fill="url(#gc-grad)">${bars}</g>
+      <path class="ripple" d="M53.38 20.17A28 28 0 0 1 53.38 43.83" fill="none" stroke="url(#gc-grad)" stroke-width="3.6" stroke-linecap="round"/>
+      <path class="ripple r2" d="M59.95 20.37A34 34 0 0 1 59.95 43.63" fill="none" stroke="url(#gc-grad)" stroke-width="3.2" stroke-linecap="round" opacity=".6"/>
+    </svg>`;
+  }
+
+  // ---------------------------------------------------------------- data (iTunes API via JSONP)
+  let jsonpN = 0;
+  function jsonp(url, timeout = 15000) {
+    return new Promise((resolve, reject) => {
+      const cb = '__gc_cb' + (++jsonpN);
+      const s = document.createElement('script');
+      const done = () => { clearTimeout(t); window[cb] = () => {}; s.remove(); };
+      const t = setTimeout(() => { done(); reject(new Error('timeout')); }, timeout);
+      window[cb] = (data) => { done(); resolve(data); };
+      s.onerror = () => { done(); reject(new Error('network')); };
+      s.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + cb;
+      document.head.appendChild(s);
+    });
+  }
+
+  async function searchShows(term) {
+    const d = await jsonp(`https://itunes.apple.com/search?media=podcast&entity=podcast&limit=30&country=${COUNTRY}&term=${encodeURIComponent(term)}`);
+    return (d.results || []).filter(r => r.collectionId).map(r => {
+      const s = {
+        id: r.collectionId,
+        title: r.collectionName || r.trackName,
+        author: r.artistName || '',
+        art: r.artworkUrl600 || r.artworkUrl100 || '',
+        feedUrl: r.feedUrl || '',
+        genre: r.primaryGenreName || ''
+      };
+      showMeta[s.id] = Object.assign(showMeta[s.id] || {}, s);
+      return s;
+    });
+  }
+
+  async function fetchEpisodes(id, force = false) {
+    const mem = epMem[id] || store.get('eps.' + id, null);
+    if (mem && !force && Date.now() - mem.t < REFRESH_MS) return (epMem[id] = mem).eps;
+    try {
+      const d = await jsonp(`https://itunes.apple.com/lookup?id=${id}&entity=podcastEpisode&limit=200&country=${COUNTRY}`);
+      const res = d.results || [];
+      const head = res.find(r => r.wrapperType !== 'podcastEpisode');
+      if (head) {
+        showMeta[id] = Object.assign(showMeta[id] || {}, {
+          id, title: head.collectionName, author: head.artistName,
+          art: head.artworkUrl600 || head.artworkUrl100 || (showMeta[id] || {}).art,
+          feedUrl: head.feedUrl || (showMeta[id] || {}).feedUrl || ''
+        });
+        const lib = library.find(x => String(x.id) === String(id));
+        if (lib && head.feedUrl && lib.feedUrl !== head.feedUrl) { lib.feedUrl = head.feedUrl; saveLibrary(); }
+      }
+      const eps = res.filter(r => r.wrapperType === 'podcastEpisode' && r.episodeUrl).map(r => ({
+        id: String(r.trackId),
+        title: r.trackName,
+        url: r.episodeUrl,
+        date: r.releaseDate,
+        dur: Math.round((r.trackTimeMillis || 0) / 1000)
+      })).sort((a, b) => new Date(b.date) - new Date(a.date));
+      const entry = { t: Date.now(), eps };
+      epMem[id] = entry;
+      if (inLib(id)) store.set('eps.' + id, entry);
+      return eps;
+    } catch (e) {
+      if (mem) return (epMem[id] = mem).eps; // stale is better than nothing
+      throw e;
+    }
+  }
+
+  // ---------------------------------------------------------------- artwork (from each show's RSS feed)
+  // Every image in the app is the podcast's own cover from its RSS feed (<itunes:image> or
+  // <image><url>). Feeds are read directly when the host allows it, otherwise through a public
+  // CORS relay. Only the feed's header is downloaded (we stop at the first <item>).
+  // If a feed can't be read at all, Apple's copy of the cover is used so nothing is left blank.
+  const FEED_ROUTES = [
+    (u) => u,
+    (u) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+    (u) => 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(u)
+  ];
+  const ART_TTL = 7 * 864e5, ART_RETRY = 864e5;
+  let feedArt = store.get('feedart', {});            // id -> {u, t} or {f:1, t}
+  const artBusy = {};
+  const artQueue = [];
+  let artRunning = 0;
+
+  function artUrl(show) {
+    if (!show) return '';
+    const e = feedArt[show.id];
+    if (e && e.u) return e.u;
+    if (e && e.f) { const m = show.art || (showMeta[show.id] || {}).art; return m ? art(m, 600) : ''; }
+    return '';
+  }
+
+  function artImg(show, cls = 'art', lazy = true) {
+    const u = artUrl(show);
+    queueArt(show);
+    return `<img class="${cls}" data-art-show="${esc(show.id)}"${u ? ` src="${esc(u)}"` : ''} alt=""${lazy ? ' loading="lazy"' : ''} decoding="async">`;
+  }
+
+  function queueArt(show) {
+    const id = show && show.id;
+    if (!id || artBusy[id]) return;
+    const e = feedArt[id];
+    if (e && Date.now() - e.t < (e.u ? ART_TTL : ART_RETRY)) return;
+    artBusy[id] = true;
+    artQueue.push(id);
+    pumpArt();
+  }
+  function pumpArt() {
+    while (artRunning < 3 && artQueue.length) {
+      const id = artQueue.shift();
+      artRunning++;
+      resolveArt(id).finally(() => { artRunning--; delete artBusy[id]; pumpArt(); });
+    }
+  }
+
+  async function resolveArt(id) {
+    const prev = feedArt[id];
+    try {
+      let fu = feedUrlOf(id);
+      if (!fu) {
+        const d = await jsonp(`https://itunes.apple.com/lookup?id=${id}&country=${COUNTRY}`);
+        const r = (d.results || [])[0] || {};
+        fu = r.feedUrl || '';
+        showMeta[id] = Object.assign(showMeta[id] || { id }, { feedUrl: fu, art: (showMeta[id] || {}).art || r.artworkUrl600 || '' });
+      }
+      if (!fu) throw new Error('no feed');
+      const u = parseFeedArt(await readFeedHead(fu));
+      if (!u) throw new Error('no artwork in feed');
+      feedArt[id] = { u, t: Date.now() };
+    } catch (e) {
+      // keep a previously found image if a refresh fails
+      feedArt[id] = prev && prev.u ? { u: prev.u, t: Date.now() - ART_TTL + ART_RETRY } : { f: 1, t: Date.now() };
+    }
+    store.set('feedart', feedArt);
+    applyArt(id);
+  }
+
+  function feedUrlOf(id) {
+    const m = showMeta[id] || {}, l = library.find(x => String(x.id) === String(id)) || {};
+    return m.feedUrl || l.feedUrl || (nowPlaying && String(nowPlaying.show.id) === String(id) && nowPlaying.show.feedUrl) || '';
+  }
+
+  async function readFeedHead(url) {
+    url = url.replace(/^http:\/\//i, 'https://');
+    let lastErr;
+    for (const route of FEED_ROUTES) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 12000);
+      try {
+        const res = await fetch(route(url), { signal: ctrl.signal, credentials: 'omit' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        let text = '';
+        if (res.body && res.body.getReader) {
+          const rd = res.body.getReader(), dec = new TextDecoder();
+          for (;;) {
+            const { done, value } = await rd.read();
+            if (done) break;
+            text += dec.decode(value, { stream: true });
+            if (/<item[\s>]/i.test(text) || text.length > 500000) { try { rd.cancel(); } catch {} break; }
+          }
+        } else text = await res.text();
+        if (!/<(rss|channel|feed)[\s>]/i.test(text)) throw new Error('not a feed');
+        return text;
+      } catch (e) { lastErr = e; }
+      finally { clearTimeout(timer); }
+    }
+    throw lastErr || new Error('feed unavailable');
+  }
+
+  function parseFeedArt(xml) {
+    const head = xml.split(/<item[\s>]/i)[0];
+    const m = head.match(/<itunes:image\b[^>]*\bhref\s*=\s*["']([^"']+)["']/i)
+      || head.match(/<image\b[^>]*>[\s\S]*?<url>\s*(?:<!\[CDATA\[)?\s*([^<\]\s]+)/i)
+      || head.match(/<media:thumbnail\b[^>]*\burl\s*=\s*["']([^"']+)["']/i)
+      || head.match(/<logo>\s*([^<\s]+)\s*<\/logo>/i);
+    if (!m) return '';
+    const u = m[1].replace(/&amp;/g, '&').replace(/&#38;/g, '&').trim().replace(/^http:\/\//i, 'https://');
+    return /^https:\/\//i.test(u) ? u : '';
+  }
+
+  function applyArt(id) {
+    const show = showMeta[id] || library.find(x => String(x.id) === String(id)) || { id };
+    const u = artUrl(show);
+    if (!u) return;
+    $$(`img[data-art-show="${CSS.escape(String(id))}"]`).forEach(img => {
+      if (img.getAttribute('src') !== u) img.src = u;
+    });
+    if (nowPlaying && String(nowPlaying.show.id) === String(id)) setMediaSession();
+  }
+
+  // If a feed's image URL itself is broken, fall back to Apple's copy of the cover.
+  document.addEventListener('error', (e) => {
+    const img = e.target;
+    if (!(img instanceof HTMLImageElement) || !img.dataset.artShow || img.dataset.fellBack) return;
+    const id = img.dataset.artShow;
+    const m = (showMeta[id] || library.find(x => String(x.id) === String(id)) || {}).art;
+    img.dataset.fellBack = '1';
+    if (m) img.src = art(m, 600);
+  }, true);
+
+  // ---------------------------------------------------------------- played state
+  const isPlayed = (ep) => !!(progress[ep.id] && progress[ep.id].played);
+  const posOf = (ep) => (progress[ep.id] && !progress[ep.id].played ? progress[ep.id].p || 0 : 0);
+  function setPlayed(ep, played) {
+    const cur = progress[ep.id] || {};
+    progress[ep.id] = { p: played ? 0 : cur.p || 0, d: cur.d || ep.dur, played, t: Date.now() };
+    saveProgress(true);
+  }
+  function newCount(show) {
+    const e = epMem[show.id] || store.get('eps.' + show.id, null);
+    if (!e) return null;
+    const since = new Date(show.added || 0);
+    return e.eps.filter(ep => new Date(ep.date) >= since && !isPlayed(ep)).length;
+  }
+
+  // ---------------------------------------------------------------- library
+  function addShow(id) {
+    if (inLib(id)) return;
+    const m = showMeta[id] || { id };
+    // "New" means episodes released after you added it — with the latest one lit up
+    // so there's always something to start on.
+    const added = new Date(Date.now() - 1).toISOString();
+    library.unshift({ id: m.id, title: m.title, author: m.author, art: m.art, feedUrl: m.feedUrl || '', added });
+    saveLibrary();
+    const e = epMem[id];
+    if (e) {
+      store.set('eps.' + id, e);
+      if (e.eps[0]) library[0].added = e.eps[0].date;
+      saveLibrary();
+    } else {
+      fetchEpisodes(id, true).then(eps => {
+        const s = library.find(x => String(x.id) === String(id));
+        if (s && eps[0]) { s.added = eps[0].date; saveLibrary(); }
+      }).catch(() => {});
+    }
+    toast('Added to Library');
+  }
+  function removeShow(id) {
+    library = library.filter(s => String(s.id) !== String(id));
+    saveLibrary();
+    store.del('eps.' + id);
+    toast('Removed from Library');
+  }
+
+  // ---------------------------------------------------------------- audio engine
+  const audio = $('#audio');
+  let lastSave = 0;
+
+  function loadEpisode(ep, show, autoplay = true) {
+    const same = nowPlaying && nowPlaying.ep.id === ep.id && audio.src;
+    nowPlaying = { ep, show: { id: show.id, title: show.title, author: show.author, art: show.art, feedUrl: show.feedUrl || feedUrlOf(show.id) } };
+    store.set('now', nowPlaying);
+    if (!same) {
+      audio.src = ep.url;
+      audio.playbackRate = speed;
+      const start = posOf(ep);
+      if (start > 5) {
+        const seek = () => { try { audio.currentTime = start; } catch {} };
+        audio.addEventListener('loadedmetadata', seek, { once: true });
+      }
+      setMediaSession();
+    }
+    if (autoplay) play();
+  }
+
+  function play() {
+    if (!audio.src && nowPlaying) loadEpisode(nowPlaying.ep, nowPlaying.show, false);
+    audio.playbackRate = speed;
+    const p = audio.play();
+    if (p && p.catch) p.catch(err => {
+      if (err && err.name !== 'AbortError') toast("Couldn't start playback");
+    });
+  }
+  const pause = () => audio.pause();
+  const toggle = () => (audio.paused ? play() : pause());
+  const dur = () => (isFinite(audio.duration) && audio.duration) || (nowPlaying && nowPlaying.ep.dur) || 0;
+
+  function seekBy(delta) {
+    if (!audio.src) return;
+    const d = dur();
+    audio.currentTime = Math.max(0, Math.min(d ? d - 0.5 : Infinity, audio.currentTime + delta));
+    persistPos(true);
+    paintPlayer();
+  }
+  function toStart() {
+    if (!audio.src) return;
+    audio.currentTime = 0;
+    persistPos(true);
+    paintPlayer();
+  }
+  function toEnd() {
+    if (!audio.src || !nowPlaying) return;
+    audio.pause();
+    const d = dur();
+    if (d) audio.currentTime = Math.max(0, d - 0.05);
+    setPlayed(nowPlaying.ep, true);
+    toast('Marked as played');
+    paintPlayer();
+  }
+
+  function persistPos(force) {
+    if (!nowPlaying || !audio.src) return;
+    const now = Date.now();
+    if (!force && now - lastSave < 5000) return;
+    lastSave = now;
+    const ep = nowPlaying.ep, d = dur(), p = audio.currentTime || 0;
+    const cur = progress[ep.id] || {};
+    const played = cur.played || (d > 60 && p >= d - PLAYED_TAIL);
+    progress[ep.id] = { p: played ? 0 : p, d, played, t: now };
+    saveProgress(force);
+  }
+
+  audio.addEventListener('timeupdate', () => { persistPos(false); paintPlayer(); });
+  audio.addEventListener('play', () => { paintPlayer(); setPlaybackState(); });
+  audio.addEventListener('pause', () => { persistPos(true); paintPlayer(); setPlaybackState(); });
+  audio.addEventListener('waiting', () => paintPlayer(true));
+  audio.addEventListener('playing', () => paintPlayer(false));
+  audio.addEventListener('loadedmetadata', () => paintPlayer());
+  audio.addEventListener('ended', () => {
+    if (nowPlaying) setPlayed(nowPlaying.ep, true);
+    paintPlayer();
+    setPlaybackState();
+  });
+  audio.addEventListener('error', () => {
+    if (audio.src) toast("Couldn't stream this episode");
+    paintPlayer(false);
+  });
+  window.addEventListener('pagehide', () => persistPos(true));
+  document.addEventListener('visibilitychange', () => { if (document.hidden) persistPos(true); });
+
+  // Media Session: lets any system/headset media controls drive GlassCast too.
+  function setMediaSession() {
+    if (!('mediaSession' in navigator) || !nowPlaying) return;
+    try {
+      const a = artUrl(nowPlaying.show);
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: nowPlaying.ep.title,
+        artist: nowPlaying.show.title,
+        album: 'GlassCast',
+        artwork: a ? [{ src: a }] : []
+      });
+    } catch {}
+  }
+  function setPlaybackState() {
+    if ('mediaSession' in navigator) {
+      try { navigator.mediaSession.playbackState = audio.paused ? 'paused' : 'playing'; } catch {}
+    }
+  }
+  if ('mediaSession' in navigator) {
+    const h = {
+      play, pause,
+      seekbackward: () => seekBy(-SKIP_BACK),
+      seekforward: () => seekBy(SKIP_FWD),
+      previoustrack: toStart,
+      nexttrack: toEnd
+    };
+    for (const [k, fn] of Object.entries(h)) {
+      try { navigator.mediaSession.setActionHandler(k, fn); } catch {}
+    }
+  }
+
+  // ---------------------------------------------------------------- router (history-backed)
+  const app = $('#app');
+  const lastFocus = {};        // screen key -> data-key of last focused element
+  let current = { name: 'home', params: {}, depth: 0 };
+  const screenKey = (st) => st.name + ':' + (st.params && st.params.id || '');
+
+  function go(name, params = {}) {
+    rememberFocus();
+    let depth = current.depth + 1;
+    const st = { name, params, depth };
+    if (depth > MAX_DEPTH) { st.depth = current.depth; history.replaceState(st, ''); }
+    else history.pushState(st, '');
+    render(st);
+  }
+  function back() {
+    if (current.depth > 0) history.back();
+    else if (current.name !== 'home') { history.replaceState({ name: 'home', params: {}, depth: 0 }, ''); render({ name: 'home', params: {}, depth: 0 }); }
+  }
+  window.addEventListener('popstate', (e) => {
+    rememberFocus();
+    render(e.state || { name: 'home', params: {}, depth: 0 });
+  });
+
+  function rememberFocus() {
+    const a = document.activeElement;
+    if (a && a.dataset && a.dataset.key) lastFocus[screenKey(current)] = a.dataset.key;
+  }
+  function focusFirst(...cands) {
+    const saved = lastFocus[screenKey(current)];
+    const el = (saved && $(`[data-key="${CSS.escape(saved)}"]`)) || cands.map(c => typeof c === 'string' ? $(c) : c).find(Boolean);
+    if (el) {
+      el.focus({ preventScroll: true });
+      el.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function render(st) {
+    current = st;
+    stopMarquee();
+    const r = SCREENS[st.name] || SCREENS.home;
+    r(st.params || {});
+  }
+
+  const backBtn = (label = 'Back') =>
+    `<button class="back" data-act="back" data-key="back" aria-label="Back">${I.back}<span>${label}</span></button>`;
+
+  function miniPlayer() {
+    if (!nowPlaying) return '';
+    const playing = !audio.paused;
+    return `<div class="mini">
+      <button class="open" data-act="player" data-key="mini-open" aria-label="Open player">
+        ${logo(playing)}
+        <span class="txt"><div class="t">${esc(nowPlaying.ep.title)}</div><div class="s">${esc(nowPlaying.show.title)}</div></span>
+      </button>
+      <button class="icon-btn" data-act="toggle" data-key="mini-toggle" aria-label="${playing ? 'Pause' : 'Play'}">${playing ? I.pause : I.play}</button>
+    </div>`;
+  }
+
+  // ---------------------------------------------------------------- screens
+  const SCREENS = {};
+
+  // HOME / LIBRARY
+  SCREENS.home = () => {
+    const shows = [...library].sort((a, b) => latestDate(b) - latestDate(a));
+    const cont = continueCard();
+    app.innerHTML = `
+      <header class="top">
+        <div class="brand">${logo(!audio.paused)}<span class="wordmark">Glass<b>Cast</b></span></div>
+        <button class="icon-btn" data-act="search" data-key="search" aria-label="Search podcasts">${I.search}</button>
+      </header>
+      <main class="content" id="scroller">
+        ${cont}
+        ${shows.length ? `<h2 class="sect">Library</h2><div class="list">${shows.map(showRow).join('')}</div>` : `
+          <div class="status">
+            ${logo(true)}
+            <div class="big">Your Library is empty</div>
+            <div>Search for a show and add it here.</div>
+            <button class="pill primary" data-act="search" data-key="empty-search">${I.search}<span>Find a show</span></button>
+          </div>`}
+      </main>
+      ${miniPlayer()}`;
+    focusFirst('.continue', '.row', '[data-act="search"]');
+    refreshLibrary();
+  };
+
+  function latestDate(show) {
+    const e = epMem[show.id] || store.get('eps.' + show.id, null);
+    return e && e.eps[0] ? new Date(e.eps[0].date).getTime() : new Date(show.added || 0).getTime();
+  }
+
+  function badgeHtml(show) {
+    const n = newCount(show);
+    if (n == null) return '';
+    return n ? `<span class="badge" aria-label="${n} new">${n > 99 ? '99+' : n} new</span>` : `<span class="badge quiet">Up to date</span>`;
+  }
+
+  function showRow(s) {
+    const e = epMem[s.id] || store.get('eps.' + s.id, null);
+    const latest = e && e.eps[0] ? 'Latest · ' + fmtDate(e.eps[0].date) : esc(s.author);
+    return `<button class="row" data-act="show" data-id="${s.id}" data-key="show-${s.id}">
+      ${artImg(s)}
+      <span class="txt"><div class="t">${esc(s.title)}</div><div class="s">${latest}</div></span>
+      <span data-badge="${s.id}">${badgeHtml(s)}</span>
+    </button>`;
+  }
+
+  function continueCard() {
+    if (!nowPlaying) return '';
+    const { ep, show } = nowPlaying;
+    const pr = progress[ep.id];
+    if (!pr || pr.played || !(pr.p > 5)) return '';
+    const d = pr.d || ep.dur || 1;
+    return `<h2 class="sect">Continue listening</h2>
+      <button class="continue" data-act="resume" data-key="continue">
+        ${artImg(show, 'art', false)}
+        <span class="txt">
+          <div class="k">${esc(show.title)}</div>
+          <div class="t">${esc(ep.title)}</div>
+          <div class="meter"><i style="width:${Math.min(100, (pr.p / d) * 100).toFixed(1)}%"></i></div>
+        </span>
+      </button>`;
+  }
+
+  let refreshing = false;
+  async function refreshLibrary() {
+    if (refreshing) return;
+    refreshing = true;
+    for (const s of library) {
+      try {
+        await fetchEpisodes(s.id);
+        const slot = $(`[data-badge="${s.id}"]`);
+        if (slot) slot.innerHTML = badgeHtml(s);
+        const row = $(`[data-act="show"][data-id="${s.id}"] .s`);
+        const e = epMem[s.id];
+        if (row && e && e.eps[0]) row.textContent = 'Latest · ' + fmtDate(e.eps[0].date);
+      } catch {}
+    }
+    refreshing = false;
+  }
+
+  // SEARCH
+  let lastSearch = { q: '', results: null, error: null, loading: false };
+  SCREENS.search = () => {
+    app.innerHTML = `
+      <header class="top">
+        ${backBtn('')}
+        <form class="searchbar" id="sform" role="search" autocomplete="off">
+          <input id="q" type="search" enterkeyhint="search" placeholder="Search podcasts" value="${esc(lastSearch.q)}" data-key="q" aria-label="Search podcasts">
+        </form>
+        <button class="icon-btn" data-act="dosearch" data-key="go" aria-label="Search">${I.search}</button>
+      </header>
+      <main class="content" id="results">${resultsHtml()}</main>
+      ${miniPlayer()}`;
+    const q = $('#q');
+    $('#sform').addEventListener('submit', (e) => { e.preventDefault(); runSearch(q.value); });
+    let deb = 0;
+    // Dictation/handwriting doesn't fire per-key events, so search on input (debounced) too.
+    q.addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(() => runSearch(q.value, true), 900); });
+    q.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { const f = $('#results button'); if (f) { e.preventDefault(); e.stopPropagation(); f.focus(); } }
+    });
+    focusFirst(lastSearch.results && lastSearch.results.length ? '#results .row' : '#q');
+  };
+
+  function resultsHtml() {
+    const s = lastSearch;
+    if (s.loading) return `<div class="list">${'<div class="skel"></div>'.repeat(5)}</div>`;
+    if (s.error) return `<div class="status"><div class="big">Search failed</div><div>Check your connection and try again.</div></div>`;
+    if (!s.results) return `<div class="status">${logo(false)}<div>Find shows by name, host or topic.</div></div>`;
+    if (!s.results.length) return `<div class="status"><div class="big">No shows found</div><div>Try a different search.</div></div>`;
+    return `<div class="list">${s.results.map(r => {
+      const on = inLib(r.id);
+      return `<div class="rowwrap">
+        <button class="row" data-act="show" data-id="${r.id}" data-key="res-${r.id}">
+          ${artImg(r)}
+          <span class="txt"><div class="t">${esc(r.title)}</div><div class="s">${esc(r.author)}</div></span>
+        </button>
+        <button class="add ${on ? 'on' : ''}" data-act="toggleadd" data-id="${r.id}" data-key="add-${r.id}" aria-label="${on ? 'In Library — remove' : 'Add to Library'}">${on ? I.check : I.plus}</button>
+      </div>`;
+    }).join('')}</div>`;
+  }
+
+  let searchSeq = 0;
+  async function runSearch(term, fromTyping = false) {
+    term = (term || '').trim();
+    if (!term || (term === lastSearch.q && lastSearch.results && fromTyping)) return;
+    const seq = ++searchSeq;
+    lastSearch = { q: term, results: null, error: null, loading: true };
+    paintResults(false);
+    try {
+      const res = await searchShows(term);
+      if (seq !== searchSeq) return;
+      lastSearch = { q: term, results: res, error: null, loading: false };
+    } catch (e) {
+      if (seq !== searchSeq) return;
+      lastSearch = { q: term, results: null, error: e, loading: false };
+    }
+    paintResults(!fromTyping);
+  }
+  function paintResults(moveFocus) {
+    const box = $('#results');
+    if (!box || current.name !== 'search') return;
+    box.innerHTML = resultsHtml();
+    box.scrollTop = 0;
+    if (moveFocus) { const f = $('#results .row'); if (f) f.focus(); }
+  }
+
+  // SHOW (episodes)
+  SCREENS.show = async ({ id }) => {
+    const s = showMeta[id] || library.find(x => String(x.id) === String(id)) || { id, title: '', author: '' };
+    const on = inLib(id);
+    app.innerHTML = `
+      <header class="top">${backBtn()}</header>
+      <main class="content" id="scroller">
+        <div class="hero">
+          ${artImg(s, 'art', false)}
+          <div><h1>${esc(s.title)}</h1><p>${esc(s.author)}</p></div>
+        </div>
+        <div class="actions">
+          <button class="pill ${on ? '' : 'primary'}" data-act="libtoggle" data-id="${id}" data-key="libtoggle">${on ? I.check + '<span>In Library</span>' : I.plus + '<span>Add to Library</span>'}</button>
+          <button class="pill" data-act="allplayed" data-id="${id}" data-key="allplayed">${I.checks}<span>Mark all played</span></button>
+        </div>
+        <h2 class="sect">Episodes</h2>
+        <div class="list" id="eps"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
+      </main>
+      ${miniPlayer()}`;
+    focusFirst('[data-act="libtoggle"]');
+    const token = current;
+    try {
+      const eps = await fetchEpisodes(id);
+      if (current !== token) return;
+      paintEpisodes(id, eps);
+    } catch {
+      if (current !== token) return;
+      $('#eps').innerHTML = `<div class="status"><div class="big">Couldn't load episodes</div><button class="pill" data-act="retry" data-key="retry">Try again</button></div>`;
+    }
+  };
+
+  function epRow(ep, showId) {
+    const pr = progress[ep.id];
+    const played = isPlayed(ep);
+    const now = nowPlaying && nowPlaying.ep.id === ep.id;
+    const d = (pr && pr.d) || ep.dur;
+    const pos = posOf(ep);
+    let meta = [fmtDate(ep.date), fmtDur(ep.dur)].filter(Boolean).join(' · ');
+    if (played) meta += ' · Played';
+    else if (pos > 5 && d) meta += ' · ' + fmtDur(Math.max(60, d - pos)) + ' left';
+    if (now && !audio.paused) meta = 'Now playing · ' + meta;
+    return `<div class="epwrap" data-ep="${ep.id}">
+      <button class="ep ${played ? 'played' : ''} ${now ? 'now' : ''}" data-act="play" data-id="${ep.id}" data-show="${showId}" data-key="ep-${ep.id}">
+        <span class="dot"></span>
+        <span class="et">${esc(ep.title)}</span>
+        <span class="em">${meta}</span>
+        ${!played && pos > 5 && d ? `<span class="meter"><i style="width:${Math.min(100, pos / d * 100).toFixed(1)}%"></i></span>` : ''}
+      </button>
+      <button class="mark ${played ? 'on' : ''}" data-act="markplayed" data-id="${ep.id}" data-show="${showId}" data-key="mk-${ep.id}" aria-label="${played ? 'Mark as unplayed' : 'Mark as played'}">${I.check}</button>
+    </div>`;
+  }
+
+  function paintEpisodes(id, eps) {
+    const box = $('#eps');
+    if (!box) return;
+    const hadFocus = box.contains(document.activeElement) ? document.activeElement.dataset.key : null;
+    box.innerHTML = eps.length ? eps.map(e => epRow(e, id)).join('')
+      : `<div class="status"><div>No streamable episodes found.</div></div>`;
+    const saved = lastFocus[screenKey(current)];
+    const target = (hadFocus && $(`[data-key="${CSS.escape(hadFocus)}"]`))
+      || (saved && $(`[data-key="${CSS.escape(saved)}"]`))
+      || $('#eps .ep:not(.played)')
+      || $('#eps .ep');
+    if (target) { target.focus({ preventScroll: true }); target.scrollIntoView({ block: 'nearest' }); }
+    // Hero hidden if we scrolled down to an older unplayed ep — that's fine; Up gets back.
+  }
+
+  function repaintEp(epId) {
+    const wrap = $(`[data-ep="${CSS.escape(epId)}"]`);
+    if (!wrap) return;
+    const showId = wrap.querySelector('.ep').dataset.show;
+    const ep = findEp(showId, epId);
+    if (!ep) return;
+    const focusKey = document.activeElement && document.activeElement.dataset.key;
+    wrap.outerHTML = epRow(ep, showId);
+    if (focusKey) { const f = $(`[data-key="${CSS.escape(focusKey)}"]`); if (f) f.focus({ preventScroll: true }); }
+  }
+  function findEp(showId, epId) {
+    const e = epMem[showId];
+    return e && e.eps.find(x => x.id === String(epId));
+  }
+
+  // PLAYER
+  let marqueeTimers = [];
+  function stopMarquee() { marqueeTimers.forEach(clearTimeout); marqueeTimers = []; }
+
+  SCREENS.player = () => {
+    if (!nowPlaying) return SCREENS.home();
+    const { ep, show } = nowPlaying;
+    app.innerHTML = `
+      <header class="top player-top">
+        ${backBtn()}
+        <div class="pl-kicker">Now playing</div>
+        <button class="pill speed" data-act="speed" data-key="speed" aria-label="Playback speed">${speed}×</button>
+      </header>
+      <main class="player" id="player">
+        <div class="cover-wrap">${artImg(show, 'cover', false)}</div>
+        <div class="show-name">${esc(show.title)}</div>
+        <div class="marquee" id="mq"><span>${esc(ep.title)}</span></div>
+        <div class="timeline">
+          <div class="meter"><i id="bar" style="width:0%"></i></div>
+          <div class="times"><span id="tcur">0:00</span><span id="tleft">-0:00</span></div>
+        </div>
+        <div class="controls">
+          <button class="ctl small" data-act="tostart" data-key="c-start" aria-label="Back to start">${I.start}</button>
+          <button class="ctl" data-act="rew" data-key="c-rew" aria-label="Back ${SKIP_BACK} seconds">${I.rew}<span class="num">${SKIP_BACK}</span></button>
+          <button class="ctl main" data-act="toggle" data-key="c-play" aria-label="Play">${I.play}</button>
+          <button class="ctl" data-act="fwd" data-key="c-fwd" aria-label="Forward ${SKIP_FWD} seconds">${I.fwd}<span class="num">${SKIP_FWD}</span></button>
+          <button class="ctl small" data-act="toend" data-key="c-end" aria-label="Skip to end">${I.end}</button>
+        </div>
+      </main>`;
+    paintPlayer();
+    const saved = lastFocus[screenKey(current)];
+    const f = (saved && $(`[data-key="${saved}"]`)) || $('[data-key="c-play"]');
+    f.focus({ preventScroll: true });
+    startMarquee();
+  };
+
+  // Long titles: wait, scroll slowly to the end once, pause, then settle back to the start.
+  function startMarquee() {
+    const box = $('#mq');
+    if (!box) return;
+    const span = box.firstElementChild;
+    requestAnimationFrame(() => {
+      const over = span.scrollWidth - (box.clientWidth - 32);
+      if (over <= 4) return;
+      box.classList.add('overflow');
+      const pxPerSec = 32;
+      const dur = Math.max(3, over / pxPerSec);
+      marqueeTimers.push(setTimeout(() => {
+        span.style.transition = `transform ${dur}s linear, opacity .5s`;
+        span.style.transform = `translateX(${-over}px)`;
+        marqueeTimers.push(setTimeout(() => {
+          span.style.opacity = '0';
+          marqueeTimers.push(setTimeout(() => {
+            span.style.transition = 'opacity .5s';
+            span.style.transform = 'translateX(0)';
+            span.style.opacity = '1';
+          }, 550));
+        }, dur * 1000 + 2500));
+      }, 2200));
+    });
+  }
+
+  let lastPaintedPlaying = null;
+  function paintPlayer(buffering) {
+    const playing = !audio.paused && !audio.ended;
+    // Player screen
+    if (current.name === 'player' && $('#player')) {
+      const d = dur(), c = audio.src ? audio.currentTime || 0 : posOf(nowPlaying.ep);
+      const bar = $('#bar');
+      if (bar) bar.style.width = (d ? Math.min(100, c / d * 100) : 0).toFixed(2) + '%';
+      $('#tcur').textContent = fmtClock(c);
+      $('#tleft').textContent = '-' + fmtClock(Math.max(0, d - c));
+      const btn = $('[data-act="toggle"].main');
+      if (btn && lastPaintedPlaying !== playing) {
+        btn.innerHTML = playing ? I.pause : I.play;
+        btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+      }
+      if (btn && buffering !== undefined) btn.classList.toggle('buffering', !!buffering && !audio.paused);
+      $('#player').classList.toggle('playing', playing);
+    }
+    // Mini player + live logo elsewhere
+    if (lastPaintedPlaying !== playing) {
+      const mt = $('.mini [data-act="toggle"]');
+      if (mt) { mt.innerHTML = playing ? I.pause : I.play; mt.setAttribute('aria-label', playing ? 'Pause' : 'Play'); }
+      $$('.logo').forEach(l => l.classList.toggle('live', playing || l.closest('.status') !== null));
+      if (current.name === 'show' && nowPlaying) repaintEp(nowPlaying.ep.id);
+    }
+    lastPaintedPlaying = playing;
+  }
+
+  // ---------------------------------------------------------------- actions
+  const ACTIONS = {
+    back,
+    search: () => go('search'),
+    dosearch: () => { const q = $('#q'); if (q) runSearch(q.value); },
+    show: (b) => go('show', { id: b.dataset.id }),
+    player: () => go('player'),
+    resume: () => { if (nowPlaying) { loadEpisode(nowPlaying.ep, nowPlaying.show, true); go('player'); } },
+    toggle: () => { toggle(); },
+    rew: () => seekBy(-SKIP_BACK),
+    fwd: () => seekBy(SKIP_FWD),
+    tostart: toStart,
+    toend: toEnd,
+    speed: (b) => {
+      speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
+      audio.playbackRate = speed;
+      store.set('speed', speed);
+      b.textContent = speed + '×';
+    },
+    toggleadd: (b) => {
+      const id = b.dataset.id;
+      if (inLib(id)) removeShow(id); else addShow(id);
+      const on = inLib(id);
+      b.classList.toggle('on', on);
+      b.innerHTML = on ? I.check : I.plus;
+      b.setAttribute('aria-label', on ? 'In Library — remove' : 'Add to Library');
+    },
+    libtoggle: (b) => {
+      const id = b.dataset.id;
+      if (inLib(id)) removeShow(id); else addShow(id);
+      const on = inLib(id);
+      b.classList.toggle('primary', !on);
+      b.innerHTML = on ? I.check + '<span>In Library</span>' : I.plus + '<span>Add to Library</span>';
+    },
+    allplayed: (b) => {
+      const e = epMem[b.dataset.id];
+      if (!e) return;
+      const allDone = e.eps.every(isPlayed);
+      e.eps.forEach(ep => {
+        const cur = progress[ep.id] || {};
+        progress[ep.id] = { p: allDone ? cur.p || 0 : 0, d: cur.d || ep.dur, played: !allDone, t: Date.now() };
+      });
+      saveProgress(true);
+      paintEpisodes(b.dataset.id, e.eps);
+      b.focus();
+      b.querySelector('span').textContent = allDone ? 'Mark all played' : 'Mark all unplayed';
+      toast(allDone ? 'All marked unplayed' : 'All marked played');
+    },
+    markplayed: (b) => {
+      const ep = findEp(b.dataset.show, b.dataset.id);
+      if (!ep) return;
+      setPlayed(ep, !isPlayed(ep));
+      repaintEp(ep.id);
+    },
+    play: (b) => {
+      const ep = findEp(b.dataset.show, b.dataset.id);
+      const show = showMeta[b.dataset.show] || library.find(s => String(s.id) === b.dataset.show);
+      if (!ep || !show) return;
+      const same = nowPlaying && nowPlaying.ep.id === ep.id && audio.src;
+      if (!same) {
+        if (nowPlaying) persistPos(true);
+        // Replaying a heard episode starts from the top; it stays "heard" until you finish or un-mark it.
+        loadEpisode(ep, show, true);
+      } else if (audio.paused) play();
+      go('player');
+    },
+    retry: () => render(current)
+  };
+
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    e.preventDefault();
+    const fn = ACTIONS[b.dataset.act];
+    if (fn) fn(b);
+  });
+
+  // Keyboard shortcuts that don't fight spatial navigation.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' || e.key === 'Backspace' && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) {
+      e.preventDefault(); back();
+    } else if (e.key === ' ' && current.name === 'player' && document.activeElement.tagName !== 'BUTTON') {
+      e.preventDefault(); toggle();
+    }
+  });
+
+  // ---------------------------------------------------------------- desktop spatial-nav fallback
+  // On the glasses the WebView moves focus itself. Desktop Chrome doesn't, so for testing in a
+  // browser/simulator we add a small spatial navigator. Force with ?nav=js or ?nav=native.
+  const navParam = new URLSearchParams(location.search).get('nav');
+  const useJsNav = navParam ? navParam === 'js' : !/Android/i.test(navigator.userAgent);
+  if (useJsNav) {
+    document.documentElement.classList.add('js-nav');
+    document.addEventListener('keydown', (e) => {
+      const dirs = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+      const dir = dirs[e.key];
+      if (!dir) return;
+      const a = document.activeElement;
+      if (a && a.tagName === 'INPUT' && dir[0] !== 0) return; // leave caret movement alone
+      e.preventDefault();
+      const from = a && a !== document.body ? a.getBoundingClientRect() : { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+      const fx = from.left + from.width / 2, fy = from.top + from.height / 2;
+      let best = null, bestScore = Infinity;
+      for (const el of $$('button, input, a[href]')) {
+        if (el === a || el.disabled) continue;
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        const dx = cx - fx, dy = cy - fy;
+        const along = dx * dir[0] + dy * dir[1];
+        if (along <= 4) continue;
+        // overlap on the cross axis is strongly preferred
+        const cross = dir[0] ? Math.max(0, Math.max(r.top, from.top) - Math.min(r.bottom, from.bottom)) === 0 ? 0 : Math.abs(dy)
+                             : Math.max(0, Math.max(r.left, from.left) - Math.min(r.right, from.right)) === 0 ? 0 : Math.abs(dx);
+        const score = along + cross * 3;
+        if (score < bestScore) { bestScore = score; best = el; }
+      }
+      if (best) { best.focus({ preventScroll: true }); best.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+      else { const sc = $('.content'); if (sc) sc.scrollBy({ top: dir[1] * 160, behavior: 'smooth' }); }
+    });
+  }
+
+  // ---------------------------------------------------------------- boot
+  history.replaceState({ name: 'home', params: {}, depth: 0 }, '');
+  render({ name: 'home', params: {}, depth: 0 });
+})();
