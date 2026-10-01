@@ -940,39 +940,103 @@
     }
   });
 
-  // ---------------------------------------------------------------- desktop spatial-nav fallback
-  // On the glasses the WebView moves focus itself. Desktop Chrome doesn't, so for testing in a
-  // browser/simulator we add a small spatial navigator. Force with ?nav=js or ?nav=native.
+  // ---------------------------------------------------------------- spatial navigation
+  // GlassCast moves focus itself rather than relying on the WebView's built-in spatial
+  // navigation. The built-in navigator won't enter a scrolling list from the header (on the
+  // glasses you could never reach the episode list), so this one is used everywhere: it can
+  // reach off-screen items and scrolls them into view. ?nav=native turns it off for testing.
   const navParam = new URLSearchParams(location.search).get('nav');
-  const useJsNav = navParam ? navParam === 'js' : !/Android/i.test(navigator.userAgent);
+  const useJsNav = navParam !== 'native';
   if (useJsNav) {
     document.documentElement.classList.add('js-nav');
+    const DIRS = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+    const FOCUSABLE = 'button:not([disabled]), input, a[href]';
+    // The screen is three regions: header (.top), the scrolling body (.content / .player)
+    // and the mini player (.mini). Moves stay inside a region where possible — including
+    // items scrolled out of view — and only hop to the next region at its edge.
+    const regionOf = (el) => el && el.closest('.top, .content, .player, .mini, #app');
+    const regions = () => $$('.top, .content, .player, .mini').filter(r => r.offsetParent !== null || r.getClientRects().length);
+    const visibleIn = (el, region) => {
+      const r = el.getBoundingClientRect(), v = region.getBoundingClientRect();
+      return r.bottom > v.top + 4 && r.top < v.bottom - 4;
+    };
+
+    function pick(cands, from, dir) {
+      const fx = from.left + from.width / 2, fy = from.top + from.height / 2;
+      let best = null, bestScore = Infinity;
+      for (const el of cands) {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        const along = (cx - fx) * dir[0] + (cy - fy) * dir[1];
+        if (along <= 4) continue;
+        const overlap = dir[0]
+          ? Math.min(r.bottom, from.bottom) - Math.max(r.top, from.top)
+          : Math.min(r.right, from.right) - Math.max(r.left, from.left);
+        if (dir[0] && overlap <= 0) continue; // left/right only moves along the same row
+        const cross = overlap > 0 ? 0 : Math.abs(cx - fx);
+        const score = along + cross * 3;
+        if (score < bestScore) { bestScore = score; best = el; }
+      }
+      return best;
+    }
+
+    function move(dir) {
+      const a = document.activeElement;
+      const all = $$(FOCUSABLE, app);
+      if (!a || a === document.body || !app.contains(a)) {
+        const first = all.find(el => el.offsetParent !== null);
+        if (first) focusEl(first);
+        return;
+      }
+      const from = a.getBoundingClientRect();
+      const home = regionOf(a);
+      // 1) same region (even if scrolled out of view)
+      let best = pick(all.filter(el => el !== a && regionOf(el) === home), from, dir);
+      // 2) neighbouring region in that direction — enter at the visible edge
+      if (!best && dir[1] !== 0) {
+        const rs = regions();
+        let i = rs.indexOf(home) + dir[1];
+        while (!best && i >= 0 && i < rs.length) {
+          const reg = rs[i];
+          const inReg = all.filter(el => regionOf(el) === reg);
+          const vis = inReg.filter(el => visibleIn(el, reg));
+          const pool = vis.length ? vis : inReg;
+          // pick the item nearest the edge we're entering from, closest horizontally
+          const fx = from.left + from.width / 2;
+          pool.sort((p, q) => {
+            const rp = p.getBoundingClientRect(), rq = q.getBoundingClientRect();
+            const ep = dir[1] > 0 ? rp.top : -rp.bottom, eq = dir[1] > 0 ? rq.top : -rq.bottom;
+            if (Math.abs(ep - eq) > 8) return ep - eq;
+            return Math.abs(rp.left + rp.width / 2 - fx) - Math.abs(rq.left + rq.width / 2 - fx);
+          });
+          best = pool[0] || null;
+          i += dir[1];
+        }
+      }
+      // 3) Left at the edge of a list jumps to Back
+      if (!best && dir[0] < 0) best = $('[data-act="back"]', app);
+      if (best) focusEl(best);
+      else if (home && home.classList.contains('content')) home.scrollBy({ top: dir[1] * 160 });
+    }
+
+    function focusEl(el) {
+      el.focus({ preventScroll: true });
+      const sc = el.closest('.content');
+      if (sc) {
+        const r = el.getBoundingClientRect(), v = sc.getBoundingClientRect(), pad = 16;
+        if (r.top < v.top + pad) sc.scrollTop -= (v.top + pad - r.top);
+        else if (r.bottom > v.bottom - pad) sc.scrollTop += (r.bottom - (v.bottom - pad));
+      }
+    }
+
     document.addEventListener('keydown', (e) => {
-      const dirs = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
-      const dir = dirs[e.key];
+      const dir = DIRS[e.key];
       if (!dir) return;
       const a = document.activeElement;
       if (a && a.tagName === 'INPUT' && dir[0] !== 0) return; // leave caret movement alone
       e.preventDefault();
-      const from = a && a !== document.body ? a.getBoundingClientRect() : { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
-      const fx = from.left + from.width / 2, fy = from.top + from.height / 2;
-      let best = null, bestScore = Infinity;
-      for (const el of $$('button, input, a[href]')) {
-        if (el === a || el.disabled) continue;
-        const r = el.getBoundingClientRect();
-        if (!r.width || !r.height) continue;
-        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-        const dx = cx - fx, dy = cy - fy;
-        const along = dx * dir[0] + dy * dir[1];
-        if (along <= 4) continue;
-        // overlap on the cross axis is strongly preferred
-        const cross = dir[0] ? Math.max(0, Math.max(r.top, from.top) - Math.min(r.bottom, from.bottom)) === 0 ? 0 : Math.abs(dy)
-                             : Math.max(0, Math.max(r.left, from.left) - Math.min(r.right, from.right)) === 0 ? 0 : Math.abs(dx);
-        const score = along + cross * 3;
-        if (score < bestScore) { bestScore = score; best = el; }
-      }
-      if (best) { best.focus({ preventScroll: true }); best.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
-      else { const sc = $('.content'); if (sc) sc.scrollBy({ top: dir[1] * 160, behavior: 'smooth' }); }
+      move(dir);
     });
   }
 
