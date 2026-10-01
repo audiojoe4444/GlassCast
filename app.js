@@ -1040,6 +1040,7 @@
 
   let lastPaintedPlaying = null;
   function paintPlayer(buffering) {
+    if (sleepState === 'off') return; // nothing to draw while the display is off
     const playing = !audio.paused && !audio.ended;
     // Player screen
     if (current.name === 'player' && $('#player')) {
@@ -1338,6 +1339,64 @@
       move(dir);
     });
   }
+
+  // ---------------------------------------------------------------- display sleep (battery saver)
+  // After a spell with no input the screen dims, then goes fully dark (black pixels are unlit
+  // on the glasses). Audio is untouched, so the episode keeps playing. Any swipe, tap or pinch
+  // wakes it, and that first press only wakes — it never presses a button by accident.
+  // Change the timings with ?idle=20,15 (seconds until dim, then seconds until off; 0 = never).
+  const IDLE = (() => {
+    const raw = new URLSearchParams(location.search).get('idle');
+    const v = raw ? raw.split(',').map(Number) : [];
+    const sec = (n, d) => (Number.isFinite(n) && n >= 0 ? n : d) * 1000;
+    return { dim: sec(v[0], 20), off: sec(v[1], 15) };
+  })();
+  let sleepState = 'awake';   // 'awake' | 'dim' | 'off'
+  let dimT = 0, offT = 0, swallowClick = false;
+
+  let sleepFocus = null;
+  function setSleep(state) {
+    if (sleepState === state) return;
+    // Hiding the screen drops the highlight, so remember where it was.
+    if (state === 'off') sleepFocus = document.activeElement;
+    sleepState = state;
+    document.body.classList.toggle('dim', state === 'dim');
+    document.body.classList.toggle('off', state === 'off');
+    if (state === 'awake') {
+      paintPlayer();
+      const a = document.activeElement;
+      if ((!a || a === document.body) && sleepFocus && sleepFocus.isConnected) sleepFocus.focus({ preventScroll: true });
+    }
+  }
+  function armIdle() {
+    clearTimeout(dimT); clearTimeout(offT);
+    if (!IDLE.dim) return;
+    dimT = setTimeout(() => {
+      setSleep('dim');
+      if (IDLE.off) offT = setTimeout(() => setSleep('off'), IDLE.off);
+    }, IDLE.dim);
+  }
+  function onActivity(e) {
+    if (sleepState !== 'awake') {
+      // This press just wakes the display.
+      if (e && e.type === 'keydown') { e.preventDefault(); e.stopImmediatePropagation(); }
+      if (e && (e.type === 'pointerdown' || e.type === 'touchstart')) swallowClick = true;
+      setSleep('awake');
+    }
+    armIdle();
+  }
+  window.addEventListener('keydown', onActivity, true);
+  window.addEventListener('pointerdown', onActivity, true);
+  window.addEventListener('touchstart', onActivity, { capture: true, passive: true });
+  window.addEventListener('wheel', onActivity, { capture: true, passive: true });
+  window.addEventListener('click', (e) => {
+    if (swallowClick) { swallowClick = false; e.preventDefault(); e.stopImmediatePropagation(); }
+  }, true);
+  // Text arriving from the glasses' text panel, or the Back gesture, also count as activity.
+  document.addEventListener('input', () => onActivity(), true);
+  window.addEventListener('popstate', () => onActivity(), true);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) onActivity(); });
+  armIdle();
 
   // ---------------------------------------------------------------- boot
   history.replaceState({ name: 'home', params: {}, depth: 0 }, '');
