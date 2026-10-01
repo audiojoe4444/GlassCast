@@ -104,6 +104,9 @@
     start: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="5" width="2.6" height="14" rx="1.2"/><path d="M19.5 6.3v11.4c0 .8-.9 1.2-1.5.8L9.6 12.8a1 1 0 0 1 0-1.6L18 5.5c.6-.4 1.5 0 1.5.8z"/></svg>',
     end: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="17.4" y="5" width="2.6" height="14" rx="1.2"/><path d="M4.5 6.3v11.4c0 .8.9 1.2 1.5.8l8.4-5.7a1 1 0 0 0 0-1.6L6 5.5c-.6-.4-1.5 0-1.5.8z"/></svg>',
     rew: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4 3.5v4h4"/></svg>',
+    kbd: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6.5 10h.01M10 10h.01M13.5 10h.01M17 10h.01M7.5 14h9"/></svg>',
+    rss: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 11a8 8 0 0 1 8 8M5 5a14 14 0 0 1 14 14"/><circle cx="6" cy="18" r="1.4" fill="currentColor" stroke="none"/></svg>',
+    bksp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5h11a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H9l-6-7z"/><path d="M12 9.5l5 5M17 9.5l-5 5"/></svg>',
     fwd: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M20 3.5v4h-4"/></svg>'
   };
 
@@ -153,6 +156,7 @@
     const mem = epMem[id] || store.get('eps.' + id, null);
     if (mem && !force && Date.now() - mem.t < REFRESH_MS) return (epMem[id] = mem).eps;
     try {
+      if (isRss(id)) return await fetchFeedShow(id, feedUrlOf(id));
       const d = await jsonp(`https://itunes.apple.com/lookup?id=${id}&entity=podcastEpisode&limit=200&country=${COUNTRY}`);
       const res = d.results || [];
       const head = res.find(r => r.wrapperType !== 'podcastEpisode');
@@ -180,6 +184,100 @@
       if (mem) return (epMem[id] = mem).eps; // stale is better than nothing
       throw e;
     }
+  }
+
+  // ---------------------------------------------------------------- shows added by RSS feed
+  // Anything typed into Search that looks like a feed address is read as an RSS feed instead
+  // of searched for. Those shows (ids start "rss:") get their episodes straight from the feed.
+  const isRss = (id) => String(id).startsWith('rss:');
+  function hash(str) {
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+    return h.toString(36);
+  }
+  function feedAddress(term) {
+    let t = (term || '').trim().replace(/\s+/g, '');
+    if (!t || /\s/.test((term || '').trim())) return '';
+    t = t.replace(/^(feed|itpc|pcast|podcast):(\/\/)?/i, '');
+    if (/^https?:\/\//i.test(t)) return t;
+    if (/^www\./i.test(t) || /^[a-z0-9-]+(\.[a-z0-9-]+)+\/\S*/i.test(t) && /(rss|feed|xml|podcast|\.php|\/)/i.test(t)) return 'https://' + t;
+    return '';
+  }
+
+  async function readFeedFull(url) {
+    const original = url;
+    const secure = url.replace(/^http:\/\//i, 'https://');
+    let lastErr;
+    for (const [i, route] of FEED_ROUTES.entries()) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 25000);
+      try {
+        const res = await fetch(route(i === 0 ? secure : original), { signal: ctrl.signal, credentials: 'omit' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const text = await res.text();
+        if (!/<(rss|channel|feed)[\s>]/i.test(text)) throw new Error('not a feed');
+        return text;
+      } catch (e) { lastErr = e; }
+      finally { clearTimeout(timer); }
+    }
+    throw lastErr || new Error('feed unavailable');
+  }
+
+  function parseDur(v) {
+    if (!v) return 0;
+    v = String(v).trim();
+    if (/^\d+(\.\d+)?$/.test(v)) return Math.round(+v);
+    const parts = v.split(':').map(Number);
+    if (parts.some(isNaN)) return 0;
+    return parts.reduce((acc, n) => acc * 60 + n, 0);
+  }
+
+  function parseFeed(xml, feedUrl, id) {
+    const doc = new DOMParser().parseFromString(xml, 'text/xml');
+    if (doc.getElementsByTagName('parsererror').length && !doc.getElementsByTagName('item').length) throw new Error('bad feed');
+    const ch = doc.getElementsByTagName('channel')[0] || doc.documentElement;
+    const txt = (el, tag) => { const n = el && el.getElementsByTagName(tag)[0]; return n ? n.textContent.trim() : ''; };
+    const direct = (el, tag) => { for (const c of el.children) if (c.tagName === tag) return c.textContent.trim(); return ''; };
+    const title = direct(ch, 'title') || 'Untitled feed';
+    const author = direct(ch, 'itunes:author') || direct(ch, 'author') || direct(ch, 'managingEditor') || '';
+    const items = [...doc.getElementsByTagName('item')].slice(0, 300);
+    const eps = [];
+    for (const it of items) {
+      const enc = it.getElementsByTagName('enclosure')[0];
+      const url = enc && enc.getAttribute('url');
+      if (!url) continue;
+      const guid = txt(it, 'guid') || url;
+      const d = new Date(txt(it, 'pubDate') || txt(it, 'dc:date'));
+      eps.push({
+        id: 'r' + hash(id + '|' + guid),
+        title: txt(it, 'title') || 'Untitled episode',
+        url: url.replace(/^http:\/\//i, 'https://'),
+        date: isNaN(d) ? '' : d.toISOString(),
+        dur: parseDur(txt(it, 'itunes:duration'))
+      });
+    }
+    eps.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    return { title, author, art: parseFeedArt(xml), eps };
+  }
+
+  async function fetchFeedShow(id, feedUrl) {
+    const f = parseFeed(await readFeedFull(feedUrl), feedUrl, id);
+    showMeta[id] = Object.assign(showMeta[id] || {}, { id, title: f.title, author: f.author, art: f.art, feedUrl, rss: true });
+    if (f.art) { feedArt[id] = { u: f.art, t: Date.now() }; store.set('feedart', feedArt); }
+    const lib = library.find(x => String(x.id) === String(id));
+    if (lib) { Object.assign(lib, { title: f.title, author: f.author, art: f.art }); saveLibrary(); }
+    const entry = { t: Date.now(), eps: f.eps };
+    epMem[id] = entry;
+    if (inLib(id)) store.set('eps.' + id, entry);
+    return f.eps;
+  }
+
+  async function lookupFeed(feedUrl) {
+    const id = 'rss:' + hash(feedUrl.replace(/^https?:\/\//i, '').toLowerCase());
+    showMeta[id] = Object.assign(showMeta[id] || {}, { id, feedUrl, rss: true });
+    await fetchFeedShow(id, feedUrl);
+    const m = showMeta[id];
+    return [{ id, title: m.title, author: m.author, art: m.art, feedUrl, rss: true }];
   }
 
   // ---------------------------------------------------------------- artwork (from each show's RSS feed)
@@ -233,7 +331,7 @@
     const prev = feedArt[id];
     try {
       let fu = feedUrlOf(id);
-      if (!fu) {
+      if (!fu && !isRss(id)) {
         const d = await jsonp(`https://itunes.apple.com/lookup?id=${id}&country=${COUNTRY}`);
         const r = (d.results || [])[0] || {};
         fu = r.feedUrl || '';
@@ -521,16 +619,18 @@
   const backBtn = (label = 'Back') =>
     `<button class="back" data-act="back" data-key="back" aria-label="Back">${I.back}<span>${label}</span></button>`;
 
-  function miniPlayer() {
-    if (!nowPlaying) return '';
-    const playing = !audio.paused;
-    return `<div class="mini">
-      <button class="open" data-act="player" data-key="mini-open" aria-label="Open player">
+  // Now-playing pill: pinned to the top of every screen while an episode is loaded.
+  function nowBar() {
+    if (!nowPlaying || !audio.src) return '<div class="nowslot"></div>';
+    const playing = !audio.paused && !audio.ended;
+    return `<div class="nowslot"><div class="nowbar">
+      <button class="nowpill" data-act="player" data-key="now-open" aria-label="Open player: ${esc(nowPlaying.ep.title)}">
         ${logo(playing)}
-        <span class="txt"><div class="t">${esc(nowPlaying.ep.title)}</div><div class="s">${esc(nowPlaying.show.title)}</div></span>
+        <span class="txt"><span class="t">${esc(nowPlaying.ep.title)}</span><span class="s">${esc(nowPlaying.show.title)}</span></span>
+        <span class="go">Player</span>
       </button>
-      <button class="icon-btn" data-act="toggle" data-key="mini-toggle" aria-label="${playing ? 'Pause' : 'Play'}">${playing ? I.pause : I.play}</button>
-    </div>`;
+      <button class="icon-btn" data-act="toggle" data-key="now-toggle" aria-label="${playing ? 'Pause' : 'Play'}">${playing ? I.pause : I.play}</button>
+    </div></div>`;
   }
 
   // ---------------------------------------------------------------- screens
@@ -540,7 +640,7 @@
   SCREENS.home = () => {
     const shows = [...library].sort((a, b) => latestDate(b) - latestDate(a));
     const cont = continueCard();
-    app.innerHTML = `
+    app.innerHTML = `${nowBar()}
       <header class="top">
         <div class="brand">${logo(!audio.paused)}<span class="wordmark">Glass<b>Cast</b></span></div>
         <button class="icon-btn" data-act="search" data-key="search" aria-label="Search podcasts">${I.search}</button>
@@ -555,7 +655,7 @@
             <button class="pill primary" data-act="search" data-key="empty-search">${I.search}<span>Find a show</span></button>
           </div>`}
       </main>
-      ${miniPlayer()}`;
+`;
     focusFirst('.continue', '.row', '[data-act="search"]');
     refreshLibrary();
   };
@@ -582,7 +682,7 @@
   }
 
   function continueCard() {
-    if (!nowPlaying) return '';
+    if (!nowPlaying || audio.src) return '';
     const { ep, show } = nowPlaying;
     const pr = progress[ep.id];
     if (!pr || pr.played || !(pr.p > 5)) return '';
@@ -616,41 +716,79 @@
   }
 
   // SEARCH
-  let lastSearch = { q: '', results: null, error: null, loading: false };
+  let lastSearch = { q: '', results: null, error: null, loading: false, feed: false };
+  let kbOpen = false, kbShift = false;
   SCREENS.search = () => {
-    app.innerHTML = `
+    app.innerHTML = `${nowBar()}
       <header class="top">
         ${backBtn('')}
         <form class="searchbar" id="sform" role="search" autocomplete="off">
-          <input id="q" type="search" enterkeyhint="search" placeholder="Search podcasts" value="${esc(lastSearch.q)}" data-key="q" aria-label="Search podcasts">
+          <input id="q" type="search" enterkeyhint="search" autocapitalize="off" spellcheck="false" placeholder="Show name or RSS feed" value="${esc(lastSearch.q)}" data-key="q" aria-label="Search by show name, or enter an RSS feed address">
         </form>
-        <button class="icon-btn" data-act="dosearch" data-key="go" aria-label="Search">${I.search}</button>
+        <button class="icon-btn kbtoggle ${kbOpen ? 'on' : ''}" data-act="keyboard" data-key="kb" aria-label="${kbOpen ? 'Hide keyboard' : 'Show keyboard'}">${I.kbd}</button>
+        <button class="pill gobtn" data-act="dosearch" data-key="go">${I.search}<span>Search</span></button>
       </header>
-      <main class="content" id="results">${resultsHtml()}</main>
-      ${miniPlayer()}`;
+      <main class="content" id="results">${kbOpen ? keyboardHtml() : resultsHtml()}</main>`;
     const q = $('#q');
     $('#sform').addEventListener('submit', (e) => { e.preventDefault(); runSearch(q.value); });
     let deb = 0;
-    // Dictation/handwriting doesn't fire per-key events, so search on input (debounced) too.
-    q.addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(() => runSearch(q.value, true), 900); });
-    q.addEventListener('keydown', (e) => {
-      if (e.key === 'ArrowDown') { const f = $('#results button'); if (f) { e.preventDefault(); e.stopPropagation(); f.focus(); } }
-    });
-    focusFirst(lastSearch.results && lastSearch.results.length ? '#results .row' : '#q');
+    // Dictation/handwriting arrives in one go when the glasses' text panel closes, so search
+    // as soon as the text lands and then move the highlight onto the results.
+    q.addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(() => runSearch(q.value, true), 700); });
+    q.addEventListener('change', () => { clearTimeout(deb); runSearch(q.value, true); });
+    if (kbOpen) focusFirst(q.value ? '[data-key="k-go"]' : '[data-key="k-https"]');
+    else focusFirst(lastSearch.results && lastSearch.results.length ? '#results .row' : '[data-key="go"]', '#q');
   };
+
+  // On-screen keyboard (for typing feed addresses, which dictation can't do well).
+  const KB_ROWS = [
+    '1234567890'.split(''),
+    'qwertyuiop'.split(''),
+    'asdfghjkl-'.split(''),
+    'zxcvbnm./:'.split(''),
+    [['https://', 'https'], ['www.', 'www'], ['.com', 'com'], ['.xml', 'xml'], ['?', 'q'], ['=', 'eq'], ['&', 'amp'], ['_', 'us']],
+  ];
+  function keyboardHtml() {
+    const key = (label, k, cls = '') => {
+      const shown = kbShift && /^[a-z]$/.test(label) ? label.toUpperCase() : label;
+      return `<button class="key ${cls}" data-act="key" data-k="${esc(label)}" data-key="k-${esc(k)}">${esc(shown)}</button>`;
+    };
+    const rows = KB_ROWS.map((row, i) => `<div class="krow ${i === 4 ? 'wide' : ''}">${row.map(c =>
+      Array.isArray(c) ? key(c[0], c[1], 'chunk') : key(c, c === '/' ? 'slash' : c === '.' ? 'dot' : c === ':' ? 'colon' : c === '-' ? 'dash' : c)).join('')}</div>`).join('');
+    return `<div class="kb" role="group" aria-label="Keyboard">
+      ${rows}
+      <div class="krow fn">
+        <button class="key fnk ${kbShift ? 'on' : ''}" data-act="kshift" data-key="k-shift" aria-label="Capital letters">${kbShift ? 'ABC' : 'abc'}</button>
+        <button class="key fnk space" data-act="key" data-k=" " data-key="k-space">space</button>
+        <button class="key fnk" data-act="kback" data-key="k-back" aria-label="Delete">${I.bksp}</button>
+        <button class="key fnk" data-act="kclear" data-key="k-clear">Clear</button>
+        <button class="key fnk go" data-act="dosearch" data-key="k-go">${I.search}<span>Search</span></button>
+      </div>
+    </div>`;
+  }
+  function kbType(fn) {
+    const q = $('#q');
+    if (!q) return;
+    q.value = fn(q.value);
+    lastSearch.q = q.value;
+    q.scrollLeft = q.scrollWidth;
+  }
 
   function resultsHtml() {
     const s = lastSearch;
-    if (s.loading) return `<div class="list">${'<div class="skel"></div>'.repeat(5)}</div>`;
-    if (s.error) return `<div class="status"><div class="big">Search failed</div><div>Check your connection and try again.</div></div>`;
-    if (!s.results) return `<div class="status">${logo(false)}<div>Find shows by name, host or topic.</div></div>`;
+    if (s.loading) return `<div class="searching">${s.feed ? 'Reading feed' : 'Searching for'} “${esc(s.q)}”…</div><div class="list">${'<div class="skel"></div>'.repeat(4)}</div>`;
+    if (s.error) return s.feed
+      ? `<div class="status"><div class="big">Couldn't read that feed</div><div>Check the address is a podcast RSS feed and try again.</div></div>`
+      : `<div class="status"><div class="big">Search failed</div><div>Check your connection and try again.</div></div>`;
+    if (!s.results) return `<div class="status">${logo(false)}<div>Find shows by name, host, topic or RSS feed.</div>
+      <button class="pill" data-act="keyboard" data-key="kb-open">${I.kbd}<span>Type with keyboard</span></button></div>`;
     if (!s.results.length) return `<div class="status"><div class="big">No shows found</div><div>Try a different search.</div></div>`;
     return `<div class="list">${s.results.map(r => {
       const on = inLib(r.id);
       return `<div class="rowwrap">
         <button class="row" data-act="show" data-id="${r.id}" data-key="res-${r.id}">
           ${artImg(r)}
-          <span class="txt"><div class="t">${esc(r.title)}</div><div class="s">${esc(r.author)}</div></span>
+          <span class="txt"><div class="t">${esc(r.title)}</div><div class="s">${r.rss ? 'From RSS feed' + (r.author ? ' · ' + esc(r.author) : '') : esc(r.author)}</div></span>
         </button>
         <button class="add ${on ? 'on' : ''}" data-act="toggleadd" data-id="${r.id}" data-key="add-${r.id}" aria-label="${on ? 'In Library — remove' : 'Add to Library'}">${on ? I.check : I.plus}</button>
       </div>`;
@@ -658,35 +796,42 @@
   }
 
   let searchSeq = 0;
-  async function runSearch(term, fromTyping = false) {
+  async function runSearch(term, quiet = false) {
     term = (term || '').trim();
-    if (!term || (term === lastSearch.q && lastSearch.results && fromTyping)) return;
+    if (!term) return;
+    if (term === lastSearch.q && (lastSearch.loading || (lastSearch.results && quiet))) return;
+    kbOpen = false;
+    const kb = $('.kbtoggle'); if (kb) kb.classList.remove('on');
+    const feed = feedAddress(term);
     const seq = ++searchSeq;
-    lastSearch = { q: term, results: null, error: null, loading: true };
+    lastSearch = { q: term, results: null, error: null, loading: true, feed: !!feed };
     paintResults(false);
     try {
-      const res = await searchShows(term);
+      const res = feed ? await lookupFeed(feed) : await searchShows(term);
       if (seq !== searchSeq) return;
-      lastSearch = { q: term, results: res, error: null, loading: false };
+      lastSearch = { q: term, results: res, error: null, loading: false, feed: !!feed };
     } catch (e) {
       if (seq !== searchSeq) return;
-      lastSearch = { q: term, results: null, error: e, loading: false };
+      lastSearch = { q: term, results: null, error: e, loading: false, feed: !!feed };
     }
-    paintResults(!fromTyping);
+    paintResults(true);
   }
   function paintResults(moveFocus) {
     const box = $('#results');
     if (!box || current.name !== 'search') return;
     box.innerHTML = resultsHtml();
     box.scrollTop = 0;
-    if (moveFocus) { const f = $('#results .row'); if (f) f.focus(); }
+    if (moveFocus) {
+      const f = $('#results .row') || $('[data-key="go"]');
+      if (f) f.focus({ preventScroll: true });
+    }
   }
 
   // SHOW (episodes)
   SCREENS.show = async ({ id }) => {
     const s = showMeta[id] || library.find(x => String(x.id) === String(id)) || { id, title: '', author: '' };
     const on = inLib(id);
-    app.innerHTML = `
+    app.innerHTML = `${nowBar()}
       <header class="top">${backBtn()}</header>
       <main class="content" id="scroller">
         <div class="hero">
@@ -700,7 +845,7 @@
         <h2 class="sect">Episodes</h2>
         <div class="list" id="eps"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
       </main>
-      ${miniPlayer()}`;
+`;
     focusFirst('[data-act="libtoggle"]');
     const token = current;
     try {
@@ -771,7 +916,7 @@
   SCREENS.player = () => {
     if (!nowPlaying) return SCREENS.home();
     const { ep, show } = nowPlaying;
-    app.innerHTML = `
+    app.innerHTML = `<div class="nowslot"></div>
       <header class="top player-top">
         ${backBtn()}
         <div class="pl-kicker">Now playing</div>
@@ -846,7 +991,7 @@
     }
     // Mini player + live logo elsewhere
     if (lastPaintedPlaying !== playing) {
-      const mt = $('.mini [data-act="toggle"]');
+      const mt = $('.nowbar [data-act="toggle"]');
       if (mt) { mt.innerHTML = playing ? I.pause : I.play; mt.setAttribute('aria-label', playing ? 'Pause' : 'Play'); }
       $$('.logo').forEach(l => l.classList.toggle('live', playing || l.closest('.status') !== null));
       if (current.name === 'show' && nowPlaying) repaintEp(nowPlaying.ep.id);
@@ -920,7 +1065,30 @@
       } else if (audio.paused) play();
       go('player');
     },
-    retry: () => render(current)
+    retry: () => render(current),
+    keyboard: () => {
+      kbOpen = !kbOpen;
+      const box = $('#results'), t = $('.kbtoggle');
+      if (!box) return;
+      box.innerHTML = kbOpen ? keyboardHtml() : resultsHtml();
+      box.scrollTop = 0;
+      if (t) { t.classList.toggle('on', kbOpen); t.setAttribute('aria-label', kbOpen ? 'Hide keyboard' : 'Show keyboard'); }
+      const f = kbOpen ? ($('#q').value ? $('[data-key="k-go"]') : $('[data-key="k-https"]')) : ($('#results .row') || t);
+      if (f) f.focus({ preventScroll: true });
+    },
+    key: (b) => {
+      let k = b.dataset.k;
+      if (kbShift && /^[a-z]$/.test(k)) k = k.toUpperCase();
+      kbType(v => v + k);
+    },
+    kback: () => kbType(v => v.slice(0, -1)),
+    kclear: () => kbType(() => ''),
+    kshift: (b) => {
+      kbShift = !kbShift;
+      b.classList.toggle('on', kbShift);
+      b.textContent = kbShift ? 'ABC' : 'abc';
+      $$('.key[data-k]').forEach(el => { const k = el.dataset.k; if (/^[a-z]$/.test(k)) el.textContent = kbShift ? k.toUpperCase() : k; });
+    }
   };
 
   document.addEventListener('click', (e) => {
@@ -951,11 +1119,11 @@
     document.documentElement.classList.add('js-nav');
     const DIRS = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
     const FOCUSABLE = 'button:not([disabled]), input, a[href]';
-    // The screen is three regions: header (.top), the scrolling body (.content / .player)
-    // and the mini player (.mini). Moves stay inside a region where possible — including
+    // The screen is three regions: the now-playing pill (.nowbar), the header (.top) and
+    // the scrolling body (.content / .player). Moves stay inside a region where possible — including
     // items scrolled out of view — and only hop to the next region at its edge.
-    const regionOf = (el) => el && el.closest('.top, .content, .player, .mini, #app');
-    const regions = () => $$('.top, .content, .player, .mini').filter(r => r.offsetParent !== null || r.getClientRects().length);
+    const regionOf = (el) => el && el.closest('.nowbar, .top, .content, .player, #app');
+    const regions = () => $$('.nowbar, .top, .content, .player').filter(r => r.offsetParent !== null || r.getClientRects().length);
     const visibleIn = (el, region) => {
       const r = el.getBoundingClientRect(), v = region.getBoundingClientRect();
       return r.bottom > v.top + 4 && r.top < v.bottom - 4;

@@ -45,7 +45,7 @@ img { display: block; }
 /* ---------- Shell ---------- */
 .app-shell {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
   grid-template-columns: minmax(0, 1fr);
   inline-size: 100%;
   block-size: 100%;
@@ -517,3 +517,75 @@ input:focus {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+
+/* ---------- Now-playing pill (top of every screen while an episode is loaded) ---------- */
+.nowslot:empty { display: none; }
+.nowbar { display: flex; gap: 8px; align-items: stretch; margin-bottom: 10px; }
+.nowpill {
+  flex: 1;
+  min-inline-size: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  block-size: 52px;
+  padding: 0 8px 0 10px;
+  border-radius: 26px;
+  background: linear-gradient(90deg, rgba(92,240,220,.16), rgba(164,139,255,.16));
+}
+.nowpill svg.logo { inline-size: 30px; block-size: 30px; flex: none; }
+.nowpill .txt { flex: 1; min-inline-size: 0; display: flex; flex-direction: column; }
+.nowpill .t { font-size: .75rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nowpill .s { font-size: .62rem; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nowpill .go {
+  flex: none;
+  font-size: .6rem;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  padding: 6px 10px;
+  border-radius: 14px;
+  background: rgba(0,0,0,.35);
+}
+.nowbar .icon-btn { inline-size: 52px; block-size: 52px; }
+
+/* ---------- Search button: labelled, and unmistakable when highlighted ---------- */
+.gobtn { block-size: 50px; padding: 0 16px; background: rgba(92,240,220,.16); color: var(--accent); flex: none; }
+.gobtn:focus-visible, .js-nav .gobtn:focus,
+.key.go:focus-visible, .js-nav .key.go:focus {
+  background: var(--grad);
+  color: #000;
+  outline-color: var(--text);
+  box-shadow: 0 0 18px rgba(92,240,220,.55);
+}
+.kbtoggle.on { background: rgba(92,240,220,.2); color: var(--accent); }
+.searchbar input:focus { box-shadow: 0 0 0 2px var(--accent) inset; }
+.searching { font-size: .8rem; color: var(--accent); margin: 4px 4px 12px; }
+.status .pill { margin-top: 4px; }
+
+/* ---------- On-screen keyboard ---------- */
+.kb { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
+.krow { display: grid; grid-template-columns: repeat(10, 1fr); gap: 6px; }
+.krow.wide { grid-template-columns: repeat(8, 1fr); }
+.krow.fn { grid-template-columns: 1fr 2fr 1fr 1.2fr 1.8fr; }
+.key {
+  block-size: 44px;
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: .9rem;
+  font-weight: 500;
+  text-align: center;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  min-inline-size: 0;
+}
+.key.chunk { font-size: .62rem; font-weight: 700; color: var(--text-2); }
+.key.fnk { font-size: .7rem; font-weight: 700; color: var(--text-2); }
+.key.fnk svg { inline-size: 22px; block-size: 22px; }
+.key.on { color: var(--accent); }
+.key.go { display: flex; gap: 6px; justify-content: center; align-items: center; color: var(--accent); background: rgba(92,240,220,.16); }
+.key.go svg { inline-size: 18px; block-size: 18px; }
+.js-nav .key:focus, .key:focus-visible { background: var(--text); color: #000; outline: none; }
+.js-nav .key.go:focus { background: var(--grad); }
