@@ -647,6 +647,13 @@
     else if (current.name !== 'home') { history.replaceState({ name: 'home', params: {}, depth: 0 }, ''); render({ name: 'home', params: {}, depth: 0 }); }
   }
   window.addEventListener('popstate', (e) => {
+    // While the display is asleep, Back only wakes it: undo the step and stay put.
+    if (sleepState !== 'awake') {
+      history.pushState(current, '');
+      setSleep('awake');
+      armIdle();
+      return;
+    }
     rememberFocus();
     render(e.state || { name: 'home', params: {}, depth: 0 });
   });
@@ -1342,14 +1349,14 @@
 
   // ---------------------------------------------------------------- display sleep (battery saver)
   // After a spell with no input the screen dims, then goes fully dark (black pixels are unlit
-  // on the glasses). Audio is untouched, so the episode keeps playing. Any swipe, tap or pinch
+  // on the glasses). Audio is untouched, so the episode keeps playing. Only Select or Back
   // wakes it, and that first press only wakes — it never presses a button by accident.
-  // Change the timings with ?idle=20,15 (seconds until dim, then seconds until off; 0 = never).
+  // Change the timings with ?idle=10,5 (seconds until dim, then seconds until off; 0 = never).
   const IDLE = (() => {
     const raw = new URLSearchParams(location.search).get('idle');
     const v = raw ? raw.split(',').map(Number) : [];
     const sec = (n, d) => (Number.isFinite(n) && n >= 0 ? n : d) * 1000;
-    return { dim: sec(v[0], 20), off: sec(v[1], 15) };
+    return { dim: sec(v[0], 10), off: sec(v[1], 5) };
   })();
   let sleepState = 'awake';   // 'awake' | 'dim' | 'off'
   let dimT = 0, offT = 0, swallowClick = false;
@@ -1376,26 +1383,33 @@
       if (IDLE.off) offT = setTimeout(() => setSleep('off'), IDLE.off);
     }, IDLE.dim);
   }
-  function onActivity(e) {
-    if (sleepState !== 'awake') {
-      // This press just wakes the display.
-      if (e && e.type === 'keydown') { e.preventDefault(); e.stopImmediatePropagation(); }
-      if (e && (e.type === 'pointerdown' || e.type === 'touchstart')) swallowClick = true;
-      setSleep('awake');
-    }
-    armIdle();
+  // Only Select (Enter / pinch) and Back wake the display. Swipes, stray taps and other
+  // hand movement are ignored while it's asleep, so everyday activity doesn't keep lighting
+  // it up. The waking press is swallowed, so it never presses a button.
+  const WAKE_KEYS = new Set(['Enter', 'Escape', 'Backspace', 'GoBack', 'BrowserBack']);
+  function onKey(e) {
+    if (sleepState === 'awake') { armIdle(); return; }
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (WAKE_KEYS.has(e.key)) { setSleep('awake'); armIdle(); }
   }
-  window.addEventListener('keydown', onActivity, true);
-  window.addEventListener('pointerdown', onActivity, true);
-  window.addEventListener('touchstart', onActivity, { capture: true, passive: true });
-  window.addEventListener('wheel', onActivity, { capture: true, passive: true });
+  function onPointer(e) {
+    if (sleepState === 'awake') { armIdle(); return; }
+    // Ignore touches while asleep, and stop them reaching any button.
+    if (e.cancelable) e.preventDefault();
+    e.stopImmediatePropagation();
+    swallowClick = true;
+  }
+  window.addEventListener('keydown', onKey, true);
+  window.addEventListener('pointerdown', onPointer, true);
+  window.addEventListener('touchstart', onPointer, { capture: true, passive: false });
+  window.addEventListener('wheel', (e) => { if (sleepState === 'awake') armIdle(); else if (e.cancelable) e.preventDefault(); }, { capture: true, passive: false });
   window.addEventListener('click', (e) => {
-    if (swallowClick) { swallowClick = false; e.preventDefault(); e.stopImmediatePropagation(); }
+    if (swallowClick || sleepState !== 'awake') { swallowClick = false; e.preventDefault(); e.stopImmediatePropagation(); }
   }, true);
-  // Text arriving from the glasses' text panel, or the Back gesture, also count as activity.
-  document.addEventListener('input', () => onActivity(), true);
-  window.addEventListener('popstate', () => onActivity(), true);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) onActivity(); });
+  // Text arriving from the glasses' text panel keeps it awake.
+  document.addEventListener('input', () => { if (sleepState === 'awake') armIdle(); }, true);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { setSleep('awake'); armIdle(); } });
   armIdle();
 
   // ---------------------------------------------------------------- boot

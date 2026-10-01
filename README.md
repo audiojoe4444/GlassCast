@@ -20,7 +20,7 @@ Plain HTML/CSS/JS — no build step, no accounts, no API keys.
 - **Playback speed** (1× → 1.25× → 1.5× → 1.75× → 2× → 0.8×), remembered between sessions.
 - **Now-playing pill** pinned to the top of every screen while an episode is loaded. Select it to open the player, or use the button beside it to play/pause.
 - **Back** button top-left on every screen, and the glasses' own Back gesture works too.
-- **Battery saver:** after 20 seconds without input the display dims to a faint glow; 15 seconds later it goes fully dark (black pixels are unlit on the glasses). The episode keeps playing throughout. Any swipe, tap or pinch wakes it, and that first press only wakes the display, so it never presses a button by accident. To change the timings, add `?idle=30,20` to the app's address (seconds to dim, then seconds to dark; `0` turns it off).
+- **Battery saver:** after 10 seconds without input the display dims to a faint glow; 5 seconds later it goes fully dark (black pixels are unlit on the glasses). The episode keeps playing throughout. **Only Select (pinch / tap) or Back wakes it.** Swipes and stray hand movement are ignored while it's asleep, and the waking press never presses a button. To change the timings, add `?idle=30,20` to the app's address (seconds to dim, then seconds to dark; `0` turns it off).
 
 ## Put it on GitHub Pages
 
