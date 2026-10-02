@@ -23,6 +23,7 @@
   })();
 
   // ---------------------------------------------------------------- storage
+  let onStoreSet = null;                    // set by the backup module
   const store = {
     get(k, d) {
       try { const v = localStorage.getItem(NS + k); return v == null ? d : JSON.parse(v); }
@@ -31,6 +32,7 @@
     set(k, v) {
       try { localStorage.setItem(NS + k, JSON.stringify(v)); }
       catch (e) { console.warn('GlassCast storage failed:', e); }
+      if (onStoreSet) onStoreSet(k);
     },
     del(k) { try { localStorage.removeItem(NS + k); } catch {} }
   };
@@ -716,6 +718,7 @@
             <div>Search for a show and add it here.</div>
             <button class="pill primary" data-act="search" data-key="empty-search">${I.search}<span>Find a show</span></button>
           </div>`}
+        <div class="backup-note" id="bknote">${backupNote()}</div>
       </main>
 `;
     focusFirst('.continue', '.row', '[data-act="search"]');
@@ -1412,7 +1415,191 @@
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { setSleep('awake'); armIdle(); } });
   armIdle();
 
+  // ---------------------------------------------------------------- backup to the user's GitHub
+  // Glasses updates can wipe a web app's storage. If the app's address carries ?sync=<GitHub
+  // key> (a "classic" token with only the gist permission), GlassCast keeps an encrypted copy of
+  // the library, played marks, positions and settings in a private gist in that account, and
+  // restores it automatically when it finds itself empty. The key never lives in the code: each
+  // person who sets it up backs up to their own account. The backup is AES-GCM encrypted with a
+  // key derived from the token, so the gist itself is unreadable without it.
+  const SYNC_TOKEN = (() => {
+    const q = new URLSearchParams(location.search).get('sync');
+    const h = new URLSearchParams(location.hash.replace(/^#/, '')).get('sync');
+    return ((h || q || '') + '').trim();
+  })();
+  const GIST_FILE = 'glasscast-backup.json';
+  const BACKUP_KEYS = { library: 'now', progress: 'lazy', now: 'lazy', speed: 'lazy' };
+  const backup = { status: SYNC_TOKEN ? 'starting' : 'off', at: 0, gistId: store.get('gistId', null), salt: null, key: null, ready: false };
+  let bkTimer = 0, bkBusy = false, bkPending = false, bkLastPush = 0;
+
+  const b64 = {
+    enc: (buf) => { let s = ''; for (const x of new Uint8Array(buf)) s += String.fromCharCode(x); return btoa(s); },
+    dec: (str) => Uint8Array.from(atob(str), c => c.charCodeAt(0))
+  };
+  async function cryptoKey(salt) {
+    if (backup.key && backup.salt && b64.enc(backup.salt) === b64.enc(salt)) return backup.key;
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(SYNC_TOKEN), 'PBKDF2', false, ['deriveKey']);
+    backup.key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' },
+      base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    backup.salt = salt;
+    return backup.key;
+  }
+  async function seal(obj) {
+    const salt = backup.salt || crypto.getRandomValues(new Uint8Array(16));
+    const key = await cryptoKey(salt);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(obj)));
+    return JSON.stringify({ app: 'GlassCast', v: 1, salt: b64.enc(salt), iv: b64.enc(iv), data: b64.enc(data) });
+  }
+  async function unseal(text) {
+    const box = JSON.parse(text);
+    const key = await cryptoKey(b64.dec(box.salt));
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64.dec(box.iv) }, key, b64.dec(box.data));
+    return JSON.parse(new TextDecoder().decode(plain));
+  }
+
+  async function gh(path, opts = {}) {
+    const res = await fetch('https://api.github.com' + path, Object.assign({}, opts, {
+      headers: Object.assign({ Authorization: 'Bearer ' + SYNC_TOKEN, Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28' }, opts.body ? { 'Content-Type': 'application/json' } : {}),
+      credentials: 'omit', cache: 'no-store'
+    }));
+    if (res.status === 401) { const e = new Error('unauthorized'); e.auth = true; throw e; }
+    if (!res.ok) { const e = new Error('HTTP ' + res.status); e.status = res.status; throw e; }
+    return res.status === 204 ? null : res.json();
+  }
+  async function findGist() {
+    if (backup.gistId) {
+      try { return await gh('/gists/' + backup.gistId); }
+      catch (e) { if (e.auth) throw e; backup.gistId = null; }
+    }
+    for (let page = 1; page <= 5; page++) {
+      const list = await gh(`/gists?per_page=100&page=${page}`);
+      const hit = list.find(g => g.files && g.files[GIST_FILE]);
+      if (hit) { backup.gistId = hit.id; store.set('gistId', hit.id); return gh('/gists/' + hit.id); }
+      if (list.length < 100) break;
+    }
+    return null;
+  }
+  async function gistContent(g) {
+    const f = g && g.files && g.files[GIST_FILE];
+    if (!f) return null;
+    if (f.truncated && f.raw_url) return (await fetch(f.raw_url, { cache: 'no-store' })).text();
+    return f.content;
+  }
+
+  function snapshot() {
+    return { savedAt: store.get('savedAt', 0), library, progress, now: nowPlaying, speed };
+  }
+  function isEmptyHere() { return !library.length && !Object.keys(progress).length; }
+
+  function applyBackup(d) {
+    library = Array.isArray(d.library) ? d.library : [];
+    progress = d.progress && typeof d.progress === 'object' ? d.progress : {};
+    nowPlaying = d.now || null;
+    speed = SPEEDS.includes(d.speed) ? d.speed : 1;
+    const hold = onStoreSet; onStoreSet = null;     // don't echo the restore back up
+    store.set('library', library); store.set('progress', progress); store.set('now', nowPlaying);
+    store.set('speed', speed); store.set('savedAt', d.savedAt || Date.now());
+    onStoreSet = hold;
+    library.forEach(x => (showMeta[x.id] = Object.assign(showMeta[x.id] || {}, x)));
+  }
+
+  async function startBackup() {
+    if (!SYNC_TOKEN) return;
+    if (!(window.crypto && crypto.subtle)) { backup.status = 'unsupported'; paintBackup(); return; }
+    try {
+      const g = await findGist();
+      if (g) {
+        let d = null;
+        try { d = await unseal(await gistContent(g)); }
+        catch { backup.status = 'locked'; paintBackup(); return; } // made with a different key: never overwrite it
+        const localAt = store.get('savedAt', 0);
+        if (d && (isEmptyHere() || (d.savedAt || 0) > localAt)) {
+          const wasEmpty = isEmptyHere();
+          applyBackup(d);
+          backup.at = d.savedAt || Date.now();
+          backup.ready = true; backup.status = 'ok';
+          if (current.name === 'home' || current.name === 'search') render(current);
+          if (wasEmpty && library.length) toast(`Library restored from backup (${library.length} show${library.length === 1 ? '' : 's'})`);
+          paintBackup();
+          return;
+        }
+        backup.at = d && d.savedAt || 0;
+      }
+      backup.ready = true; backup.status = 'ok';
+      if (!g || store.get('savedAt', 0) > backup.at) queueBackup(true);
+      paintBackup();
+    } catch (e) {
+      backup.status = e.auth ? 'badkey' : 'offline';
+      paintBackup();
+      if (!e.auth) setTimeout(startBackup, 60000);
+    }
+  }
+
+  function queueBackup(urgent) {
+    if (!SYNC_TOKEN || !backup.ready) { bkPending = true; return; }
+    // Library changes go up within seconds; listening positions at most once a minute.
+    if (bkTimer && !urgent) return;            // a save is already on its way
+    clearTimeout(bkTimer);
+    const wait = urgent ? 3000 : Math.max(5000, 60000 - (Date.now() - bkLastPush));
+    bkTimer = setTimeout(() => { bkTimer = 0; pushBackup(); }, wait);
+  }
+  async function pushBackup(final) {
+    if (!backup.ready || bkBusy) { bkPending = true; return; }
+    if (isEmptyHere() && !backup.gistId) return;   // nothing worth saving yet
+    bkBusy = true; bkPending = false;
+    try {
+      const body = JSON.stringify({ description: 'GlassCast backup (encrypted)', files: { [GIST_FILE]: { content: await seal(snapshot()) } } });
+      if (backup.gistId) await gh('/gists/' + backup.gistId, { method: 'PATCH', body, keepalive: !!final });
+      else {
+        const g = await gh('/gists', { method: 'POST', body: JSON.stringify(Object.assign(JSON.parse(body), { public: false })) });
+        backup.gistId = g.id; store.set('gistId', g.id);
+      }
+      bkLastPush = Date.now(); backup.at = store.get('savedAt', Date.now()); backup.status = 'ok';
+    } catch (e) {
+      backup.status = e.auth ? 'badkey' : 'offline';
+      if (e.status === 404) { backup.gistId = null; store.del('gistId'); }
+      if (!e.auth) bkPending = true;
+    } finally {
+      bkBusy = false;
+      paintBackup();
+      if (bkPending && backup.status === 'ok') queueBackup(false);
+    }
+  }
+
+  onStoreSet = (k) => {
+    if (!SYNC_TOKEN || !(k in BACKUP_KEYS)) return;
+    try { localStorage.setItem(NS + 'savedAt', JSON.stringify(Date.now())); } catch {}
+    queueBackup(BACKUP_KEYS[k] === 'now');
+  };
+  // Last chance to save when the app is closed or hidden.
+  document.addEventListener('visibilitychange', () => { if (document.hidden && bkTimer && backup.ready) { clearTimeout(bkTimer); bkTimer = 0; pushBackup(true); } });
+
+  function ago(t) {
+    const s = Math.round((Date.now() - t) / 1000);
+    if (s < 60) return 'just now';
+    const m = Math.round(s / 60);
+    if (m < 60) return m + ' min ago';
+    const h = Math.round(m / 60);
+    return h < 24 ? h + ' hr ago' : Math.round(h / 24) + ' days ago';
+  }
+  function backupNote() {
+    switch (backup.status) {
+      case 'off': return '';
+      case 'starting': return `<span class="dot"></span>Checking backup…`;
+      case 'ok': return `<span class="dot ok"></span>Backed up to GitHub${backup.at ? ' · ' + ago(backup.at) : ''}`;
+      case 'badkey': return `<span class="dot bad"></span>Backup paused: GitHub didn't accept the key in the app's address`;
+      case 'locked': return `<span class="dot bad"></span>Backup paused: the saved backup was made with a different key`;
+      case 'unsupported': return `<span class="dot bad"></span>Backup isn't supported on this device`;
+      default: return `<span class="dot warn"></span>Backup waiting for a connection`;
+    }
+  }
+  function paintBackup() { const n = $('#bknote'); if (n) n.innerHTML = backupNote(); }
+  setInterval(paintBackup, 30000);
+
   // ---------------------------------------------------------------- boot
   history.replaceState({ name: 'home', params: {}, depth: 0 }, '');
   render({ name: 'home', params: {}, depth: 0 });
+  startBackup();
 })();
