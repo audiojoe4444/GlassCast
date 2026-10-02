@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="referrer" content="no-referrer">
+  <title>Send to GlassCast</title>
+  <link rel="icon" type="image/png" sizes="64x64" href="icons/favicon-64.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-title" content="GlassCast Send">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #000; --card: #111417; --line: #23292e; --text: #F4F7FA; --text-2: #A7B1BC;
+      --accent: #5CF0DC; --accent-2: #A48BFF; --warn: #FF8A7A;
+      --grad: linear-gradient(120deg, var(--accent), var(--accent-2));
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--text); }
+    body {
+      font-family: "Noto Sans", system-ui, -apple-system, sans-serif;
+      padding: max(20px, env(safe-area-inset-top)) 18px max(28px, env(safe-area-inset-bottom));
+      max-width: 520px; margin: 0 auto; -webkit-font-smoothing: antialiased;
+    }
+    header { display: flex; align-items: center; gap: 10px; margin: 8px 0 22px; }
+    header svg { width: 38px; height: 38px; }
+    .wordmark { font-size: 22px; }
+    .wordmark b { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    h1 { font-size: 26px; margin: 0 0 6px; }
+    p.lead { color: var(--text-2); margin: 0 0 22px; line-height: 1.45; font-size: 15px; }
+    label { display: block; font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--text-2); margin: 0 0 8px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 16px; margin-bottom: 16px; }
+    input, textarea {
+      width: 100%; font: inherit; color: var(--text); background: #000; border: 1px solid var(--line);
+      border-radius: 12px; padding: 14px; font-size: 17px; outline: none;
+    }
+    input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(92,240,220,.18); }
+    #code { font-size: 28px; font-weight: 700; letter-spacing: .14em; text-align: center; text-transform: uppercase; }
+    textarea { min-height: 120px; resize: vertical; word-break: break-all; }
+    .row { display: flex; gap: 10px; margin-top: 10px; }
+    button {
+      font: inherit; font-weight: 700; border: 0; border-radius: 999px; padding: 14px 18px; cursor: pointer;
+      background: #1c2226; color: var(--text); font-size: 15px;
+    }
+    button.primary { background: var(--grad); color: #000; flex: 1; font-size: 17px; }
+    button:disabled { opacity: .5; }
+    .msg { min-height: 24px; margin-top: 14px; font-size: 15px; text-align: center; }
+    .msg.ok { color: var(--accent); }
+    .msg.err { color: var(--warn); }
+    .tips { color: var(--text-2); font-size: 13px; line-height: 1.5; margin-top: 26px; }
+    .tips b { color: var(--text); }
+    .hint { color: var(--text-2); font-size: 13px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5CF0DC"/><stop offset="1" stop-color="#A48BFF"/></linearGradient></defs><path d="M44.85 46.14A22 22 0 1 1 44.85 17.86" fill="none" stroke="url(#g)" stroke-width="4" stroke-linecap="round"/><g fill="url(#g)"><rect x="16.3" y="27" width="3.4" height="10" rx="1.7"/><rect x="21.3" y="23" width="3.4" height="18" rx="1.7"/><rect x="26.3" y="19" width="3.4" height="26" rx="1.7"/><rect x="31.3" y="23" width="3.4" height="18" rx="1.7"/><rect x="36.3" y="27" width="3.4" height="10" rx="1.7"/></g><path d="M53.38 20.17A28 28 0 0 1 53.38 43.83" fill="none" stroke="url(#g)" stroke-width="3.6" stroke-linecap="round"/><path d="M59.95 20.37A34 34 0 0 1 59.95 43.63" fill="none" stroke="url(#g)" stroke-width="3.2" stroke-linecap="round" opacity=".6"/></svg>
+    <span class="wordmark">Glass<b>Cast</b></span>
+  </header>
+
+  <h1>Send to your glasses</h1>
+  <p class="lead">Paste a podcast's RSS feed link (a private Patreon feed works too) or type a show name. It appears on your glasses in a few seconds.</p>
+
+  <div class="card">
+    <label for="code">Code shown on your glasses</label>
+    <input id="code" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="9" placeholder="XXXX-XXXX">
+    <div class="hint">On the glasses: Search → <b>Add via phone</b>. Your phone remembers the code.</div>
+  </div>
+
+  <div class="card">
+    <label for="q">RSS feed link or show name</label>
+    <textarea id="q" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…"></textarea>
+    <div class="row">
+      <button id="paste" type="button">Paste</button>
+      <button id="clear" type="button">Clear</button>
+      <button id="send" class="primary" type="button">Send to glasses</button>
+    </div>
+    <div id="msg" class="msg" role="status"></div>
+  </div>
+
+  <div class="tips">
+    <b>Tip:</b> tap Share → <b>Add to Home Screen</b> to keep this page one tap away.<br>
+    Everything you send is encrypted on this phone with your code before it leaves, so the relay service can't read your feed links.
+  </div>
+
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const codeEl = $('code'), qEl = $('q'), msg = $('msg'), sendBtn = $('send');
+  const ALPHA = /[^23456789ABCDEFGHJKMNPQRSTUVWXYZ]/g;
+  const say = (t, cls = '') => { msg.textContent = t; msg.className = 'msg ' + cls; };
+  const store = {
+    get(k) { try { return localStorage.getItem('glasscast-send.' + k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem('glasscast-send.' + k, v); } catch {} }
+  };
+
+  const normal = (v) => (v || '').toUpperCase().replace(ALPHA, '').slice(0, 8);
+  const pretty = (c) => c.length > 4 ? c.slice(0, 4) + '-' + c.slice(4) : c;
+
+  const fromUrl = new URLSearchParams(location.search).get('c');
+  codeEl.value = pretty(normal(fromUrl || store.get('code') || ''));
+  codeEl.addEventListener('input', () => {
+    const c = normal(codeEl.value);
+    codeEl.value = pretty(c);
+    if (c.length === 8) store.set('code', c);
+  });
+
+  $('paste').addEventListener('click', async () => {
+    try {
+      const t = await navigator.clipboard.readText();
+      if (t) { qEl.value = t.trim(); say(''); }
+      else say('Nothing to paste: copy the feed link first.', 'err');
+    } catch { qEl.focus(); say('Press and hold in the box, then tap Paste.', ''); }
+  });
+  $('clear').addEventListener('click', () => { qEl.value = ''; say(''); qEl.focus(); });
+
+  const b64 = (buf) => { let s = ''; for (const x of new Uint8Array(buf)) s += String.fromCharCode(x); return btoa(s); };
+  async function channel(code) {
+    const enc = new TextEncoder();
+    const h = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode('glasscast-topic:' + code)));
+    const topic = 'glasscast-' + Array.from(h.slice(0, 12), (x) => x.toString(16).padStart(2, '0')).join('');
+    const base = await crypto.subtle.importKey('raw', enc.encode(code), 'PBKDF2', false, ['deriveKey']);
+    const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: enc.encode('glasscast-phone-v1'), iterations: 100000, hash: 'SHA-256' },
+      base, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+    return { topic, key };
+  }
+
+  sendBtn.addEventListener('click', async () => {
+    const code = normal(codeEl.value);
+    const text = qEl.value.trim();
+    if (code.length !== 8) { say('Enter the 8-character code from your glasses.', 'err'); codeEl.focus(); return; }
+    if (!text) { say('Paste a feed link or type a show name first.', 'err'); qEl.focus(); return; }
+    if (!(window.crypto && crypto.subtle)) { say('This browser can\'t encrypt. Try Safari.', 'err'); return; }
+    sendBtn.disabled = true; say('Sending…');
+    try {
+      const { topic, key } = await channel(code);
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key,
+        new TextEncoder().encode(JSON.stringify({ q: text, t: Date.now() })));
+      const res = await fetch('https://ntfy.sh/' + topic, { method: 'POST', body: JSON.stringify({ iv: b64(iv), data: b64(data) }) });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      store.set('code', code);
+      say('Sent ✓ Check your glasses.', 'ok');
+    } catch (e) {
+      say('Couldn\'t send. Check your connection and try again.', 'err');
+    } finally { sendBtn.disabled = false; }
+  });
+})();
+</script>
+</body>
+</html>

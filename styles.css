@@ -649,3 +649,17 @@ body.off *, body.off *::before, body.off *::after { animation-play-state: paused
 .backup-note .dot.ok { background: var(--accent); }
 .backup-note .dot.warn { background: #FFC86B; }
 .backup-note .dot.bad { background: var(--warn, #FF8A7A); }
+
+/* ---------- Add via phone ---------- */
+.pillrow { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.phonepanel { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; padding: 8px 0 4px; }
+.ph-icon svg { inline-size: 40px; block-size: 40px; color: var(--accent); }
+.ph-step { font-size: .75rem; color: var(--text-2); }
+.ph-url { font-size: .85rem; font-weight: 700; color: var(--text); word-break: break-all; margin-bottom: 4px; }
+.ph-code {
+  font-size: 2.1rem; font-weight: 700; letter-spacing: .12em; font-variant-numeric: tabular-nums;
+  background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; margin: 2px 0 6px;
+}
+.ph-status { display: flex; gap: 8px; align-items: center; font-size: .7rem; color: var(--text-2); margin-bottom: 10px; }
+.ph-status .dot { inline-size: 8px; block-size: 8px; border-radius: 50%; background: #FFC86B; }
+.ph-status.on .dot { background: var(--accent); box-shadow: 0 0 8px rgba(92,240,220,.7); }

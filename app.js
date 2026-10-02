@@ -110,6 +110,7 @@
     rss: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 11a8 8 0 0 1 8 8M5 5a14 14 0 0 1 14 14"/><circle cx="6" cy="18" r="1.4" fill="currentColor" stroke="none"/></svg>',
     x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>',
     trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 7h15M9.5 7V4.8h5V7M6.5 7l.9 12.2h9.2L17.5 7M10 10.5v5.5M14 10.5v5.5"/></svg>',
+    phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 18.5h3"/></svg>',
     bksp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5h11a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H9l-6-7z"/><path d="M12 9.5l5 5M17 9.5l-5 5"/></svg>',
     fwd: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M20 3.5v4h-4"/></svg>'
   };
@@ -785,7 +786,8 @@
 
   // SEARCH
   let lastSearch = { q: '', results: null, error: null, loading: false, feed: false };
-  let kbOpen = false, kbShift = false;
+  let kbOpen = false, kbShift = false, phoneOpen = false;
+  const panelHtml = () => (phoneOpen ? phonePanelHtml() : kbOpen ? keyboardHtml() : resultsHtml());
   SCREENS.search = () => {
     app.innerHTML = `${nowBar()}
       <header class="top">
@@ -797,7 +799,7 @@
         <button class="icon-btn kbtoggle ${kbOpen ? 'on' : ''}" data-act="keyboard" data-key="kb" aria-label="${kbOpen ? 'Hide keyboard' : 'Show keyboard'}">${I.kbd}</button>
         <button class="pill gobtn" data-act="dosearch" data-key="go">${I.search}<span>Search</span></button>
       </header>
-      <main class="content" id="results">${kbOpen ? keyboardHtml() : resultsHtml()}</main>`;
+      <main class="content" id="results">${panelHtml()}</main>`;
     const q = $('#q');
     $('#sform').addEventListener('submit', (e) => { e.preventDefault(); runSearch(q.value); });
     let deb = 0;
@@ -857,7 +859,10 @@
           <button class="pill" data-act="clearq" data-key="err-clear">${I.x}<span>Clear and start again</span></button></div>`
       : `<div class="status"><div class="big">Search failed</div><div>Check your connection and try again.</div></div>`;
     if (!s.results) return `<div class="status">${logo(false)}<div>Find shows by name, host, topic or RSS feed.</div>
-      <button class="pill" data-act="keyboard" data-key="kb-open">${I.kbd}<span>Type with keyboard</span></button></div>`;
+      <div class="pillrow">
+        <button class="pill primary" data-act="phone" data-key="phone-open">${I.phone}<span>Add via phone</span></button>
+        <button class="pill" data-act="keyboard" data-key="kb-open">${I.kbd}<span>Type with keyboard</span></button>
+      </div></div>`;
     if (!s.results.length) return `<div class="status"><div class="big">No shows found</div><div>Try a different search.</div></div>`;
     return `<div class="list">${s.results.map(r => {
       const on = inLib(r.id);
@@ -876,7 +881,7 @@
     term = (term || '').trim();
     if (!term) return;
     if (term === lastSearch.q && (lastSearch.loading || (lastSearch.results && quiet))) return;
-    kbOpen = false;
+    kbOpen = false; phoneOpen = false;
     const kb = $('.kbtoggle'); if (kb) kb.classList.remove('on');
     syncClear();
     const feed = feedAddress(term);
@@ -1171,7 +1176,7 @@
       searchSeq++;
       syncClear();
       const box = $('#results');
-      if (box) box.innerHTML = kbOpen ? keyboardHtml() : resultsHtml();
+      if (box) box.innerHTML = panelHtml();
       const f = kbOpen ? $('[data-key="k-https"]') : q;
       if (f) f.focus({ preventScroll: true });
       toast('Search cleared');
@@ -1209,11 +1214,35 @@
       go('player');
     },
     retry: () => render(current),
+    phone: () => {
+      phoneOpen = true; kbOpen = false;
+      const t = $('.kbtoggle'); if (t) t.classList.remove('on');
+      const show = () => {
+        const box = $('#results');
+        if (box && phoneOpen) { box.innerHTML = panelHtml(); box.scrollTop = 0; }
+        const f = $('[data-key="phone-close"]'); if (f) f.focus({ preventScroll: true });
+      };
+      if (!Phone.code) Phone.start().then(show); else show();
+    },
+    phoneclose: () => {
+      phoneOpen = false;
+      const box = $('#results');
+      if (box) box.innerHTML = panelHtml();
+      const f = $('[data-key="phone-open"]') || $('#q'); if (f) f.focus({ preventScroll: true });
+    },
+    phonenew: () => {
+      Phone.start(true).then(() => {
+        const box = $('#results');
+        if (box && phoneOpen) box.innerHTML = panelHtml();
+        const f = $('[data-key="phone-new"]'); if (f) f.focus({ preventScroll: true });
+        toast('New code made');
+      });
+    },
     keyboard: () => {
-      kbOpen = !kbOpen;
+      kbOpen = !kbOpen; phoneOpen = false;
       const box = $('#results'), t = $('.kbtoggle');
       if (!box) return;
-      box.innerHTML = kbOpen ? keyboardHtml() : resultsHtml();
+      box.innerHTML = panelHtml();
       box.scrollTop = 0;
       if (t) { t.classList.toggle('on', kbOpen); t.setAttribute('aria-label', kbOpen ? 'Hide keyboard' : 'Show keyboard'); }
       const f = kbOpen ? ($('#q').value ? $('[data-key="k-go"]') : $('[data-key="k-https"]')) : ($('#results .row') || t);
@@ -1597,6 +1626,105 @@
   }
   function paintBackup() { const n = $('#bknote'); if (n) n.innerHTML = backupNote(); }
   setInterval(paintBackup, 30000);
+
+  // ---------------------------------------------------------------- add via phone
+  // The glasses show a short pairing code. On the phone, send.html (same site) takes a pasted
+  // feed link or show name and posts it through ntfy.sh, a free push relay. Messages are
+  // AES-GCM encrypted with a key derived from the code, and the relay topic is a hash of the
+  // code, so the relay never sees the code, the feed link or any private key inside it.
+  const Phone = {
+    base: 'https://ntfy.sh',
+    code: store.get('pairCode', null), key: null, topicId: null, es: null, ready: false,
+    seen: store.get('phoneSeen', []),
+    newCode() {
+      const A = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
+      const r = crypto.getRandomValues(new Uint32Array(8));
+      return Array.from(r, n => A[n % A.length]).join('');
+    },
+    pretty() { return this.code ? this.code.slice(0, 4) + '-' + this.code.slice(4) : ''; },
+    pageUrl() { return location.host + location.pathname.replace(/[^/]*$/, '') + 'send.html'; },
+    async derive() {
+      const enc = new TextEncoder();
+      const h = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode('glasscast-topic:' + this.code)));
+      this.topicId = 'glasscast-' + Array.from(h.slice(0, 12), x => x.toString(16).padStart(2, '0')).join('');
+      const base = await crypto.subtle.importKey('raw', enc.encode(this.code), 'PBKDF2', false, ['deriveKey']);
+      this.key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: enc.encode('glasscast-phone-v1'), iterations: 100000, hash: 'SHA-256' },
+        base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+    },
+    async start(reset = false) {
+      if (!(window.crypto && crypto.subtle)) return;
+      if (reset || !this.code) { this.code = this.newCode(); store.set('pairCode', this.code); }
+      if (this.es) { this.es.close(); this.es = null; }
+      this.setStatus(false);
+      await this.derive();
+      const url = `${this.base}/${this.topicId}`;
+      // Anything sent in the last 15 minutes while GlassCast was closed.
+      fetch(`${url}/json?poll=1&since=15m`).then(r => r.text()).then(txt => {
+        const msgs = txt.split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return null; } })
+          .filter(m => m && m.event === 'message' && !this.seen.includes(m.id));
+        msgs.forEach(m => this.markSeen(m.id));
+        if (msgs.length) this.deliver(msgs[msgs.length - 1]);
+      }).catch(() => {});
+      if (!('EventSource' in window)) return;
+      const es = new EventSource(`${url}/sse`);
+      es.onopen = () => this.setStatus(true);
+      es.onerror = () => this.setStatus(false);
+      es.onmessage = (e) => {
+        let m; try { m = JSON.parse(e.data); } catch { return; }
+        this.setStatus(true);
+        if (m.event !== 'message' || this.seen.includes(m.id)) return;
+        this.markSeen(m.id);
+        this.deliver(m);
+      };
+      this.es = es;
+    },
+    markSeen(id) { this.seen = [id, ...this.seen].slice(0, 30); store.set('phoneSeen', this.seen); },
+    setStatus(on) {
+      this.ready = on;
+      const el = $('#phone-status');
+      if (el) { el.classList.toggle('on', on); el.lastElementChild.textContent = on ? 'Ready — waiting for your phone' : 'Connecting…'; }
+    },
+    async deliver(m) {
+      if (m.time && Date.now() / 1000 - m.time > 15 * 60) return;
+      let text = '';
+      try {
+        const box = JSON.parse(m.message);
+        const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64.dec(box.iv) }, this.key, b64.dec(box.data));
+        text = (JSON.parse(new TextDecoder().decode(plain)).q || '').trim();
+      } catch { return; } // not ours, or sent with an old code
+      if (!text) return;
+      if (sleepState !== 'awake') { setSleep('awake'); armIdle(); }
+      phoneOpen = false; kbOpen = false;
+      if (current.name !== 'search') go('search');
+      const q = $('#q');
+      if (q) { q.value = text; syncClear(); }
+      await runSearch(text);
+      // A feed link sent from the phone goes straight into the Library.
+      if (feedAddress(text) && lastSearch.results && lastSearch.results[0]) {
+        const r = lastSearch.results[0];
+        if (!inLib(r.id)) addShow(r.id);
+        paintResults(true);
+        toast(`Added “${r.title}” to your Library`);
+      } else toast('Received from your phone');
+    }
+  };
+  function phonePanelHtml() {
+    if (!Phone.code) return '<div class="status">Getting a code…</div>';
+    return `<div class="phonepanel">
+      <div class="ph-icon">${I.phone}</div>
+      <div class="ph-step">On your phone, open</div>
+      <div class="ph-url">${esc(Phone.pageUrl())}</div>
+      <div class="ph-step">and enter this code</div>
+      <div class="ph-code">${esc(Phone.pretty())}</div>
+      <div id="phone-status" class="ph-status ${Phone.ready ? 'on' : ''}"><span class="dot"></span><span>${Phone.ready ? 'Ready — waiting for your phone' : 'Connecting…'}</span></div>
+      <div class="pillrow">
+        <button class="pill" data-act="phoneclose" data-key="phone-close">${I.back}<span>Done</span></button>
+        <button class="pill" data-act="phonenew" data-key="phone-new">New code</button>
+      </div>
+    </div>`;
+  }
+  // Keep listening once a phone has been paired, so links arrive whenever GlassCast is open.
+  if (Phone.code) Phone.start();
 
   // ---------------------------------------------------------------- boot
   history.replaceState({ name: 'home', params: {}, depth: 0 }, '');
