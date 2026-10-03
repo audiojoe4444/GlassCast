@@ -217,6 +217,7 @@
     constructor(kind, status) { super(kind); this.kind = kind; this.status = status; }
   }
   async function readFeedFull(url) {
+    url = url.replace(/^(https?:\/\/)patreon\.com\//i, '$1www.patreon.com/');
     const original = url;
     const secure = url.replace(/^http:\/\//i, 'https://');
     let lastErr;
@@ -259,6 +260,7 @@
     if (k === 'status') return `The feed host returned error ${e.status}. Check the address and try again.`;
     if (k === 'notfeed') return 'That address opened a web page, not a podcast feed. Make sure it\'s the RSS link.';
     if (k === 'timeout') return 'The feed took too long to load. Try again in a moment.';
+    if (k === 'blocked') return 'The feed\'s host wouldn\'t let GlassCast read it, and the backup route couldn\'t reach it either. Try again in a moment.';
     return 'The feed couldn\'t be reached. Check your connection and the address.';
   }
 
@@ -271,9 +273,51 @@
     return parts.reduce((acc, n) => acc * 60 + n, 0);
   }
 
+  // Lenient reader for feeds that aren't strictly valid XML (e.g. Patreon's, which use HTML
+  // entities like &nbsp; that a strict XML parser rejects).
+  function decodeXml(s) {
+    const NAMED = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', hellip: '…',
+      lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', copy: '©', reg: '®', trade: '™', eacute: 'é', egrave: 'è', aacute: 'á', uuml: 'ü', ouml: 'ö', auml: 'ä' };
+    return String(s || '')
+      .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+      .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+      .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(+d))
+      .replace(/&([a-z]+);/gi, (m, n) => NAMED[n.toLowerCase()] ?? m);
+  }
+  function tagText(src, name) {
+    const m = src.match(new RegExp('<' + name + '(?:\\s[^>]*)?>([\\s\\S]*?)</' + name + '>', 'i'));
+    return m ? decodeXml(m[1]).replace(/<[^>]+>/g, '').trim() : '';
+  }
+  function parseFeedLoose(xml, id) {
+    const head = xml.split(/<item[\s>]/i)[0];
+    const items = (xml.match(/<item[\s>][\s\S]*?<\/item>/gi) || []).slice(0, 300);
+    const eps = [];
+    for (const it of items) {
+      const em = it.match(/<enclosure\b[^>]*\burl\s*=\s*["']([^"']+)["']/i);
+      if (!em) continue;
+      const url = decodeXml(em[1]).trim();
+      const guid = tagText(it, 'guid') || url;
+      const d = new Date(tagText(it, 'pubDate') || tagText(it, 'dc:date'));
+      eps.push({
+        id: 'r' + hash(id + '|' + guid),
+        title: tagText(it, 'title') || 'Untitled episode',
+        url: url.replace(/^http:\/\//i, 'https://'),
+        date: isNaN(d) ? '' : d.toISOString(),
+        dur: parseDur(tagText(it, 'itunes:duration'))
+      });
+    }
+    if (!eps.length && !/<channel[\s>]/i.test(xml)) throw new FeedError('notfeed');
+    eps.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    return {
+      title: tagText(head, 'title') || 'Untitled feed',
+      author: tagText(head, 'itunes:author') || tagText(head, 'author') || tagText(head, 'managingEditor') || '',
+      art: parseFeedArt(xml), eps
+    };
+  }
+
   function parseFeed(xml, feedUrl, id) {
     const doc = new DOMParser().parseFromString(xml, 'text/xml');
-    if (doc.getElementsByTagName('parsererror').length && !doc.getElementsByTagName('item').length) throw new Error('bad feed');
+    if (doc.getElementsByTagName('parsererror').length) return parseFeedLoose(xml, id);
     const ch = doc.getElementsByTagName('channel')[0] || doc.documentElement;
     const txt = (el, tag) => { const n = el && el.getElementsByTagName(tag)[0]; return n ? n.textContent.trim() : ''; };
     const direct = (el, tag) => { for (const c of el.children) if (c.tagName === tag) return c.textContent.trim(); return ''; };
@@ -679,6 +723,7 @@
     stopMarquee();
     const r = SCREENS[st.name] || SCREENS.home;
     r(st.params || {});
+    try { if (sleepState === 'awake') armIdle(); } catch {}  // screen timeout depends on the screen
   }
 
   const backBtn = (label = 'Back') =>
@@ -722,7 +767,10 @@
         <div class="backup-note" id="bknote">${backupNote()}</div>
       </main>
 `;
-    focusFirst('.continue', '.row', '[data-act="search"]');
+    // Land on what you're listening to: the now-playing pill, or the Continue listening card.
+    const listening = $('[data-key="now-open"]') || $('.continue');
+    if (listening) { listening.focus({ preventScroll: true }); listening.scrollIntoView({ block: 'nearest' }); }
+    else focusFirst('.row', '[data-act="search"]');
     refreshLibrary();
   };
 
@@ -1407,13 +1455,16 @@
       if ((!a || a === document.body) && sleepFocus && sleepFocus.isConnected) sleepFocus.focus({ preventScroll: true });
     }
   }
+  // Search (with its keyboard and phone panels) needs more time: 30 s to dim, 30 s more to dark.
+  const SEARCH_IDLE = { dim: 30000, off: 30000 };
   function armIdle() {
     clearTimeout(dimT); clearTimeout(offT);
     if (!IDLE.dim) return;
+    const t = current && current.name === 'search' ? SEARCH_IDLE : IDLE;
     dimT = setTimeout(() => {
       setSleep('dim');
-      if (IDLE.off) offT = setTimeout(() => setSleep('off'), IDLE.off);
-    }, IDLE.dim);
+      if (t.off) offT = setTimeout(() => setSleep('off'), t.off);
+    }, t.dim);
   }
   // Only Select (Enter / pinch) and Back wake the display. Swipes, stray taps and other
   // hand movement are ignored while it's asleep, so everyday activity doesn't keep lighting
