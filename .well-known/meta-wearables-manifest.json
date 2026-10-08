@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "GlassCast",
+  "description": "Search, follow and stream podcasts on your glasses.",
+  "appearance": {
+    "theme_color": "#0E4F4A",
+    "icon": {
+      "src": "../icons/icon-mono.png",
+      "type": "monochrome"
+    },
+    "icon_background": {
+      "colors": ["#0B3F3B", "#2B1F66"],
+      "stops": [0.0, 1.0],
+      "inner_glow_color": "#5CF0DC"
+    }
+  }
+}
